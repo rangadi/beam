@@ -274,6 +274,12 @@
       </dependency>
 
       <dependency>
+        <groupId>org.apache.beam</groupId>
+        <artifactId>kafka</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <dependency>
         <groupId>io.grpc</groupId>
         <artifactId>grpc-all</artifactId>
         <version>${grpc.version}</version>
