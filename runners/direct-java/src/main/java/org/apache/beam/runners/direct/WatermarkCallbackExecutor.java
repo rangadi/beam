@@ -29,8 +29,7 @@ import org.joda.time.Instant;
 import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 
 /**
  * Executes callbacks that occur based on the progression of the watermark per-step.
@@ -52,17 +51,17 @@ class WatermarkCallbackExecutor {
   /**
    * Create a new {@link WatermarkCallbackExecutor}.
    */
-  public static WatermarkCallbackExecutor create() {
-    return new WatermarkCallbackExecutor();
+  public static WatermarkCallbackExecutor create(Executor executor) {
+    return new WatermarkCallbackExecutor(executor);
   }
 
   private final ConcurrentMap<AppliedPTransform<?, ?, ?>, PriorityQueue<WatermarkCallback>>
       callbacks;
-  private final ExecutorService executor;
+  private final Executor executor;
 
-  private WatermarkCallbackExecutor() {
+  private WatermarkCallbackExecutor(Executor executor) {
     this.callbacks = new ConcurrentHashMap<>();
-    this.executor = Executors.newSingleThreadExecutor();
+    this.executor = executor;
   }
 
   /**
@@ -102,7 +101,7 @@ class WatermarkCallbackExecutor {
     }
     synchronized (callbackQueue) {
       while (!callbackQueue.isEmpty() && callbackQueue.peek().shouldFire(watermark)) {
-        executor.submit(callbackQueue.poll().getCallback());
+        executor.execute(callbackQueue.poll().getCallback());
       }
     }
   }

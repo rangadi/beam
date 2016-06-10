@@ -25,21 +25,6 @@ page at http://checkstyle.sourceforge.net/config.html -->
 
 <module name="Checker">
 
-  <!-- Requires the Apache copyright header in each file.
-    Code intended to be open-sourced may have a multi-line copyright
-    notice, so that this required text appears on the second line:
-    <pre>
-      /*
-       * Licensed to the Apache Software Foundation (ASF) under one
-       * ...
-    </pre>
-    See http://checkstyle.sf.net/config_header.html -->
-  <module name="Header">
-    <property name="headerFile" value="${checkstyle.header.file}"/>
-    <property name="ignoreLines" value="2"/>
-    <property name="fileExtensions" value="java, scala"/>
-  </module>
-
   <module name="FileTabCharacter">
     <!-- Checks that there are no tab characters in the file. -->
   </module>
@@ -110,7 +95,7 @@ page at http://checkstyle.sourceforge.net/config.html -->
     </module>
 
     <module name="IllegalImport">
-      <property name="illegalPkgs" value="com.google.api.client.repackaged"/>
+      <property name="illegalPkgs" value="com.google.api.client.repackaged, com.google.api.client.util.util.ByteStreams, com.google.api.client.util.Charsets, com.google.api.client.util.Collections2, com.google.api.client.util.Joiner, com.google.api.client.util.Lists, com.google.api.client.util.Maps, com.google.api.client.util.Objects, com.google.api.client.util.Preconditions, com.google.api.client.util.Sets, com.google.api.client.util.Strings, com.google.api.client.util.Throwables, io.netty.util.internal"/>
     </module>
 
     <module name="UnusedImports">
@@ -387,6 +372,16 @@ page at http://checkstyle.sourceforge.net/config.html -->
       <property name="tokens" value="SEMI, DOT, POST_DEC, POST_INC"/>
       <property name="allowLineBreaks" value="true"/>
       <property name="severity" value="error"/>
+    </module>
+
+    <module name="OperatorWrap">
+      <!-- Checks that operators like + and ? appear at newlines rather than
+           at the end of the previous line.
+      -->
+      <property name="option" value="NL"/>
+      <property name="tokens" value="BAND, BOR, BSR, BXOR, DIV, EQUAL,
+        GE, GT, LAND, LE, LITERAL_INSTANCEOF, LOR, LT, MINUS, MOD,
+        NOT_EQUAL, PLUS, QUESTION, SL, SR, STAR "/>
     </module>
 
     <module name="ParenPad">

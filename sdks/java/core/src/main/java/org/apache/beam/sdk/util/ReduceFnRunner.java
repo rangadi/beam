@@ -22,6 +22,7 @@ import org.apache.beam.sdk.transforms.Aggregator;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.OutputTimeFn;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.Timing;
@@ -40,6 +41,7 @@ import org.apache.beam.sdk.values.PCollection;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
 
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -47,8 +49,10 @@ import org.joda.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.annotation.Nullable;
@@ -61,21 +65,21 @@ import javax.annotation.Nullable;
  * the triggering logic. The {@code ReduceFnRunner}s responsibilities are:
  *
  * <ul>
- *   <li>Tracking the windows that are active (have buffered data) as elements arrive and
- *       triggers are fired.
- *   <li>Holding the watermark based on the timestamps of elements in a pane and releasing it
- *       when the trigger fires.
- *   <li>Calling the appropriate callbacks on {@link ReduceFn} based on trigger execution, timer
- *       firings, etc, and providing appropriate contexts to the {@link ReduceFn} for actions
- *       such as output.
- *   <li>Scheduling garbage collection of state associated with a specific window, and making that
- *       happen when the appropriate timer fires.
+ * <li>Tracking the windows that are active (have buffered data) as elements arrive and
+ * triggers are fired.
+ * <li>Holding the watermark based on the timestamps of elements in a pane and releasing it
+ * when the trigger fires.
+ * <li>Calling the appropriate callbacks on {@link ReduceFn} based on trigger execution, timer
+ * firings, etc, and providing appropriate contexts to the {@link ReduceFn} for actions
+ * such as output.
+ * <li>Scheduling garbage collection of state associated with a specific window, and making that
+ * happen when the appropriate timer fires.
  * </ul>
  *
- * @param <K> The type of key being processed.
- * @param <InputT> The type of values associated with the key.
+ * @param <K>       The type of key being processed.
+ * @param <InputT>  The type of values associated with the key.
  * @param <OutputT> The output type that will be produced for each key.
- * @param <W> The type of windows this operates on.
+ * @param <W>       The type of windows this operates on.
  */
 public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
@@ -83,14 +87,14 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
    * The {@link ReduceFnRunner} depends on most aspects of the {@link WindowingStrategy}.
    *
    * <ul>
-   *   <li>It runs the trigger from the {@link WindowingStrategy}.</li>
-   *   <li>It merges windows according to the {@link WindowingStrategy}.</li>
-   *   <li>It chooses how to track active windows and clear out expired windows
-   *       according to the {@link WindowingStrategy}, based on the allowed lateness and
-   *       whether windows can merge.</li>
-   *   <li>It decides whether to emit empty final panes according to whether the
-   *       {@link WindowingStrategy} requires it.<li>
-   *   <li>It uses discarding or accumulation mode according to the {@link WindowingStrategy}.</li>
+   * <li>It runs the trigger from the {@link WindowingStrategy}.</li>
+   * <li>It merges windows according to the {@link WindowingStrategy}.</li>
+   * <li>It chooses how to track active windows and clear out expired windows
+   * according to the {@link WindowingStrategy}, based on the allowed lateness and
+   * whether windows can merge.</li>
+   * <li>It decides whether to emit empty final panes according to whether the
+   * {@link WindowingStrategy} requires it.<li>
+   * <li>It uses discarding or accumulation mode according to the {@link WindowingStrategy}.</li>
    * </ul>
    */
   private final WindowingStrategy<Object, W> windowingStrategy;
@@ -103,11 +107,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
   private final K key;
 
-  private final OnMergeCallback onMergeCallback = new OnMergeCallback();
-
   /**
-   * Track which windows are still active and which 'state address' windows contain state
-   * for a merged window.
+   * Track which windows are still active and the 'state address' windows which hold their state.
    *
    * <ul>
    * <li>State: Global map for all active windows for this computation and key.
@@ -251,7 +252,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
   @VisibleForTesting
   boolean hasNoActiveWindows() {
-    return activeWindows.getActiveWindows().isEmpty();
+    return activeWindows.getActiveAndNewWindows().isEmpty();
   }
 
   /**
@@ -260,34 +261,34 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
    *
    * <p>The general strategy is:
    * <ol>
-   *   <li>Use {@link WindowedValue#getWindows} (itself determined using
-   *       {@link WindowFn#assignWindows}) to determine which windows each element belongs to. Some
-   *       of those windows will already have state associated with them. The rest are considered
-   *       NEW.
-   *   <li>Use {@link WindowFn#mergeWindows} to attempt to merge currently ACTIVE and NEW windows.
-   *       Each NEW window will become either ACTIVE, MERGED, or EPHEMERAL. (See {@link
-   *       ActiveWindowSet} for definitions of these terms.)
-   *   <li>If at all possible, eagerly substitute EPHEMERAL windows with their ACTIVE state address
-   *       windows before any state is associated with the EPHEMERAL window. In the common case that
-   *       windows for new elements are merged into existing ACTIVE windows then no additional
-   *       storage or merging overhead will be incurred.
-   *   <li>Otherwise, keep track of the state address windows for ACTIVE windows so that their
-   *       states can be merged on-demand when a pane fires.
-   *   <li>Process the element for each of the windows it's windows have been merged into according
-   *       to {@link ActiveWindowSet}. Processing may require running triggers, setting timers,
-   *       setting holds, and invoking {@link ReduceFn#onTrigger}.
+   * <li>Use {@link WindowedValue#getWindows} (itself determined using
+   * {@link WindowFn#assignWindows}) to determine which windows each element belongs to. Some
+   * of those windows will already have state associated with them. The rest are considered
+   * NEW.
+   * <li>Use {@link WindowFn#mergeWindows} to attempt to merge currently ACTIVE and NEW windows.
+   * Each NEW window will become either ACTIVE or be discardedL.
+   * (See {@link ActiveWindowSet} for definitions of these terms.)
+   * <li>If at all possible, eagerly substitute NEW windows with their ACTIVE state address
+   * windows before any state is associated with the NEW window. In the common case that
+   * windows for new elements are merged into existing ACTIVE windows then no additional
+   * storage or merging overhead will be incurred.
+   * <li>Otherwise, keep track of the state address windows for ACTIVE windows so that their
+   * states can be merged on-demand when a pane fires.
+   * <li>Process the element for each of the windows it's windows have been merged into according
+   * to {@link ActiveWindowSet}. Processing may require running triggers, setting timers,
+   * setting holds, and invoking {@link ReduceFn#onTrigger}.
    * </ol>
    */
   public void processElements(Iterable<WindowedValue<InputT>> values) throws Exception {
     // If an incoming element introduces a new window, attempt to merge it into an existing
-    // window eagerly. The outcome is stored in the ActiveWindowSet.
-    collectAndMergeWindows(values);
+    // window eagerly.
+    Map<W, W> windowToMergeResult = collectAndMergeWindows(values);
 
     Set<W> windowsToConsider = new HashSet<>();
 
     // Process each element, using the updated activeWindows determined by collectAndMergeWindows.
     for (WindowedValue<InputT> value : values) {
-      windowsToConsider.addAll(processElement(value));
+      windowsToConsider.addAll(processElement(windowToMergeResult, value));
     }
 
     // Trigger output from any window for which the trigger is ready
@@ -303,8 +304,6 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     // We're all done with merging and emitting elements so can compress the activeWindow state.
     // Any windows which are still NEW must have come in on a new element which was then discarded
     // due to the window's trigger being closed. We can thus delete them.
-    // Any windows which are EPHEMERAL must have come in on a new element but been merged away
-    // into some other ACTIVE window. We can thus also delete them.
     activeWindows.cleanupTemporaryWindows();
   }
 
@@ -313,12 +312,15 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
   }
 
   /**
-   * Extract the windows associated with the values, and invoke merge.
+   * Extract the windows associated with the values, and invoke merge. Return a map
+   * from windows to the merge result window. If a window is not in the domain of
+   * the result map then it did not get merged into a different window.
    */
-  private void collectAndMergeWindows(Iterable<WindowedValue<InputT>> values) throws Exception {
+  private Map<W, W> collectAndMergeWindows(Iterable<WindowedValue<InputT>> values)
+      throws Exception {
     // No-op if no merging can take place
     if (windowingStrategy.getWindowFn().isNonMerging()) {
-      return;
+      return ImmutableMap.of();
     }
 
     // Collect the windows from all elements (except those which are too late) and
@@ -329,6 +331,10 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
         W window = (W) untypedWindow;
 
         // For backwards compat with pre 1.4 only.
+        // We may still have ACTIVE windows with multiple state addresses, representing
+        // a window who's state has not yet been eagerly merged.
+        // We'll go ahead and merge that state now so that we don't have to worry about
+        // this legacy case anywhere else.
         if (activeWindows.isActive(window)) {
           Set<W> stateAddressWindows = activeWindows.readStateAddresses(window);
           if (stateAddressWindows.size() > 1) {
@@ -342,19 +348,41 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
           }
         }
 
-        // Add this window as NEW if it is not currently ACTIVE or MERGED.
+        // Add this window as NEW if it is not currently ACTIVE.
         // If we had already seen this window and closed its trigger, then the
-        // window will not be ACTIVE or MERGED. It will then be added as NEW here,
+        // window will not be currently ACTIVE. It will then be added as NEW here,
         // and fall into the merging logic as usual.
         activeWindows.ensureWindowExists(window);
       }
     }
 
     // Merge all of the active windows and retain a mapping from source windows to result windows.
-    mergeActiveWindows();
+    Map<W, W> windowToMergeResult = new HashMap<>();
+    activeWindows.merge(new OnMergeCallback(windowToMergeResult));
+    return windowToMergeResult;
   }
 
   private class OnMergeCallback implements ActiveWindowSet.MergeCallback<W> {
+    private final Map<W, W> windowToMergeResult;
+
+    OnMergeCallback(Map<W, W> windowToMergeResult) {
+      this.windowToMergeResult = windowToMergeResult;
+    }
+
+    /**
+     * Return the subset of {@code windows} which are currently ACTIVE. We only need to worry
+     * about merging state from ACTIVE windows. NEW windows by definition have no existing state.
+     */
+    private List<W> activeWindows(Iterable<W> windows) {
+      List<W> active = new ArrayList<>();
+      for (W window : windows) {
+        if (activeWindows.isActive(window)) {
+          active.add(window);
+        }
+      }
+      return active;
+    }
+
     /**
      * Called from the active window set to indicate {@code toBeMerged} (of which only
      * {@code activeToBeMerged} are ACTIVE and thus have state associated with them) will later
@@ -362,7 +390,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
      */
     @Override
     public void prefetchOnMerge(
-        Collection<W> toBeMerged, Collection<W> activeToBeMerged, W mergeResult) throws Exception {
+        Collection<W> toBeMerged, W mergeResult) throws Exception {
+      List<W> activeToBeMerged = activeWindows(toBeMerged);
       ReduceFn<K, InputT, OutputT, W>.OnMergeContext directMergeContext =
           contextFactory.forMerge(activeToBeMerged, mergeResult, StateStyle.DIRECT);
       ReduceFn<K, InputT, OutputT, W>.OnMergeContext renamedMergeContext =
@@ -381,9 +410,14 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
      * to be merged into {@code mergeResult}.
      */
     @Override
-    public void onMerge(Collection<W> toBeMerged, Collection<W> activeToBeMerged, W mergeResult)
-        throws Exception {
+    public void onMerge(Collection<W> toBeMerged, W mergeResult) throws Exception {
+      // Remember we have merged these windows.
+      for (W window : toBeMerged) {
+        windowToMergeResult.put(window, mergeResult);
+      }
+
       // At this point activeWindows has NOT incorporated the results of the merge.
+      List<W> activeToBeMerged = activeWindows(toBeMerged);
       ReduceFn<K, InputT, OutputT, W>.OnMergeContext directMergeContext =
           contextFactory.forMerge(activeToBeMerged, mergeResult, StateStyle.DIRECT);
       ReduceFn<K, InputT, OutputT, W>.OnMergeContext renamedMergeContext =
@@ -407,7 +441,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
           // Not merged away.
           continue;
         }
-        // Cleanup flavor A: Currently ACTIVE window is about to become MERGED.
+        // Cleanup flavor A: Currently ACTIVE window is about to be merged away.
         // Clear any state not already cleared by the onMerge calls above.
         WindowTracing.debug("ReduceFnRunner.onMerge: Merging {} into {}", active, mergeResult);
         ReduceFn<K, InputT, OutputT, W>.Context directClearContext =
@@ -424,17 +458,14 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
   }
 
-  private void mergeActiveWindows() throws Exception {
-    activeWindows.merge(onMergeCallback);
-  }
-
   /**
    * Process an element.
-   * @param value the value being processed
    *
+   * @param value the value being processed
    * @return the set of windows in which the element was actually processed
    */
-  private Collection<W> processElement(WindowedValue<InputT> value) throws Exception {
+  private Collection<W> processElement(Map<W, W> windowToMergeResult, WindowedValue<InputT> value)
+      throws Exception {
     // Redirect element windows to the ACTIVE windows they have been merged into.
     // The compressed representation (value, {window1, window2, ...}) actually represents
     // distinct elements (value, window1), (value, window2), ...
@@ -444,12 +475,11 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     for (BoundedWindow untypedWindow : value.getWindows()) {
       @SuppressWarnings("unchecked")
       W window = (W) untypedWindow;
-
-      ReduceFn<K, InputT, OutputT, W>.Context directContext =
-          contextFactory.base(window, StateStyle.DIRECT);
-      W active = activeWindows.mergeResultWindow(window);
-      Preconditions.checkState(active != null, "Window %s has no mergeResultWindow", window);
-      windows.add(active);
+      W mergeResult = windowToMergeResult.get(window);
+      if (mergeResult == null) {
+        mergeResult = window;
+      }
+      windows.add(mergeResult);
     }
 
     // Prefetch in each of the windows if we're going to need to process triggers
@@ -464,7 +494,6 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     for (W window : windows) {
       ReduceFn<K, InputT, OutputT, W>.ProcessValueContext directContext = contextFactory.forValue(
           window, value.getValue(), value.getTimestamp(), StateStyle.DIRECT);
-
       if (triggerRunner.isClosed(directContext.state())) {
         // This window has already been closed.
         droppedDueToClosedWindow.addValue(1L);
@@ -478,9 +507,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
       triggerableWindows.add(window);
       activeWindows.ensureWindowIsActive(window);
-
       ReduceFn<K, InputT, OutputT, W>.ProcessValueContext renamedContext = contextFactory.forValue(
           window, value.getValue(), value.getTimestamp(), StateStyle.RENAMED);
+
       nonEmptyPanes.recordContent(renamedContext.state());
 
       // Make sure we've scheduled the end-of-window or garbage collection timer for this window.
@@ -544,22 +573,25 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     // - If the window function does not support windowing then all windows will be considered
     // active.
     // So we must take conjunction of activeWindows and triggerRunner state.
-    boolean windowIsActive =
+    boolean windowIsActiveAndOpen =
         activeWindows.isActive(window) && !triggerRunner.isClosed(directContext.state());
 
-    if (!windowIsActive) {
+    if (!windowIsActiveAndOpen) {
       WindowTracing.debug(
           "ReduceFnRunner.onTimer: Note that timer {} is for non-ACTIVE window {}", timer, window);
     }
 
-    // If this is an end-of-window timer then, we need to set a GC timer
+    // If this is an end-of-window timer then we may need to set a garbage collection timer
+    // if allowed lateness is non-zero.
     boolean isEndOfWindow = TimeDomain.EVENT_TIME == timer.getDomain()
-      && timer.getTimestamp().equals(window.maxTimestamp());
+        && timer.getTimestamp().equals(window.maxTimestamp());
 
     // If this is a garbage collection timer then we should trigger and garbage collect the window.
-    Instant cleanupTime = window.maxTimestamp().plus(windowingStrategy.getAllowedLateness());
-    boolean isGarbageCollection =
-        TimeDomain.EVENT_TIME == timer.getDomain() && timer.getTimestamp().equals(cleanupTime);
+    // We'll consider any timer at or after the end-of-window time to be a signal to garbage
+    // collect.
+    Instant cleanupTime = garbageCollectionTime(window);
+    boolean isGarbageCollection = TimeDomain.EVENT_TIME == timer.getDomain()
+        && !timer.getTimestamp().isBefore(cleanupTime);
 
     if (isGarbageCollection) {
       WindowTracing.debug(
@@ -568,23 +600,26 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
           key, window, timer.getTimestamp(), timerInternals.currentInputWatermarkTime(),
           timerInternals.currentOutputWatermarkTime());
 
-      if (windowIsActive) {
+      if (windowIsActiveAndOpen) {
         // We need to call onTrigger to emit the final pane if required.
         // The final pane *may* be ON_TIME if no prior ON_TIME pane has been emitted,
         // and the watermark has passed the end of the window.
-        onTrigger(directContext, renamedContext, true/* isFinished */, isEndOfWindow);
+        @Nullable Instant newHold =
+            onTrigger(directContext, renamedContext, true/* isFinished */, isEndOfWindow);
+        Preconditions.checkState(newHold == null,
+            "Hold placed at %s despite isFinished being true.", newHold);
       }
 
       // Cleanup flavor B: Clear all the remaining state for this window since we'll never
       // see elements for it again.
-      clearAllState(directContext, renamedContext, windowIsActive);
+      clearAllState(directContext, renamedContext, windowIsActiveAndOpen);
     } else {
       WindowTracing.debug(
           "ReduceFnRunner.onTimer: Triggering for key:{}; window:{} at {} with "
           + "inputWatermark:{}; outputWatermark:{}",
           key, window, timer.getTimestamp(), timerInternals.currentInputWatermarkTime(),
           timerInternals.currentOutputWatermarkTime());
-      if (windowIsActive) {
+      if (windowIsActiveAndOpen) {
         emitIfAppropriate(directContext, renamedContext);
       }
 
@@ -598,7 +633,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
         // timer. (If getAllowedLateness is zero then the timer event will be considered a
         // cleanup event and handled by the above).
         // Note we must do this even if the trigger is finished so that we are sure to cleanup
-        // any final trigger tombstones.
+        // any final trigger finished bits.
         Preconditions.checkState(
             windowingStrategy.getAllowedLateness().isLongerThan(Duration.ZERO),
             "Unexpected zero getAllowedLateness");
@@ -607,6 +642,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
             + "inputWatermark:{}; outputWatermark:{}",
             key, directContext.window(), cleanupTime, timerInternals.currentInputWatermarkTime(),
             timerInternals.currentOutputWatermarkTime());
+        Preconditions.checkState(!cleanupTime.isAfter(BoundedWindow.TIMESTAMP_MAX_VALUE),
+                                 "Cleanup time %s is beyond end-of-time", cleanupTime);
         directContext.timers().setTimer(cleanupTime, TimeDomain.EVENT_TIME);
       }
     }
@@ -618,27 +655,46 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
    * beyond allowed lateness.
    * This is a superset of the clearing done by {@link #emitIfAppropriate} below since:
    * <ol>
-   * <li>We can clear the trigger state tombstone since we'll never need to ask about it again.
+   * <li>We can clear the trigger finished bits since we'll never need to ask if the trigger is
+   * closed again.
    * <li>We can clear any remaining garbage collection hold.
    * </ol>
    */
   private void clearAllState(
       ReduceFn<K, InputT, OutputT, W>.Context directContext,
       ReduceFn<K, InputT, OutputT, W>.Context renamedContext,
-      boolean windowIsActive)
-          throws Exception {
-    if (windowIsActive) {
+      boolean windowIsActiveAndOpen)
+      throws Exception {
+    if (windowIsActiveAndOpen) {
       // Since both the window is in the active window set AND the trigger was not yet closed,
       // it is possible we still have state.
       reduceFn.clearState(renamedContext);
       watermarkHold.clearHolds(renamedContext);
       nonEmptyPanes.clearPane(renamedContext.state());
+      // These calls work irrespective of whether the window is active or not, but
+      // are unnecessary if the window is not active.
       triggerRunner.clearState(
           directContext.window(), directContext.timers(), directContext.state());
+      paneInfoTracker.clear(directContext.state());
     } else {
-      // Needed only for backwards compatibility over UPDATE.
-      // Clear any end-of-window or garbage collection holds keyed by the current window.
-      // Only needed if:
+      // If !windowIsActiveAndOpen then !activeWindows.isActive (1) or triggerRunner.isClosed (2).
+      // For (1), if !activeWindows.isActive then the window must be merging and has been
+      // explicitly removed by emitIfAppropriate. But in that case the trigger must have fired
+      // and been closed, so this case reduces to (2).
+      // For (2), if triggerRunner.isClosed then the trigger was fired and entered the
+      // closed state. In that case emitIfAppropriate will have cleared all state in
+      // reduceFn, triggerRunner (except for finished bits), paneInfoTracker and activeWindows.
+      // We also know nonEmptyPanes must have been unconditionally cleared by the trigger.
+      // Since the trigger fired the existing watermark holds must have been cleared, and since
+      // the trigger closed no new end of window or garbage collection hold will have been
+      // placed by WatermarkHold.extractAndRelease.
+      // Thus all the state clearing above is unnecessary.
+      //
+      // But(!) for backwards compatibility we must allow a pipeline to be updated from
+      // an sdk version <= 1.3. In that case it is possible we have an end-of-window or
+      // garbage collection hold keyed by the current window (reached via directContext) rather
+      // than the state address window (reached via renamedContext).
+      // However this can only happen if:
       // - We have merging windows.
       // - We are DISCARDING_FIRED_PANES.
       // - A pane has fired.
@@ -648,11 +704,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
         watermarkHold.clearHolds(directContext);
       }
     }
-    paneInfoTracker.clear(directContext.state());
-    if (activeWindows.isActive(directContext.window())) {
-      // Don't need to track address state windows anymore.
-      activeWindows.remove(directContext.window());
-    }
+
+    // Don't need to track address state windows anymore.
+    activeWindows.remove(directContext.window());
     // We'll never need to test for the trigger being closed again.
     triggerRunner.clearFinished(directContext.state());
   }
@@ -735,8 +789,11 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
   /**
    * Run the {@link ReduceFn#onTrigger} method and produce any necessary output.
+   *
+   * @return output watermark hold added, or {@literal null} if none.
    */
-  private void onTrigger(
+  @Nullable
+  private Instant onTrigger(
       final ReduceFn<K, InputT, OutputT, W>.Context directContext,
       ReduceFn<K, InputT, OutputT, W>.Context renamedContext,
       boolean isFinished, boolean isEndOfWindow)
@@ -772,8 +829,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
       if (newHold.isAfter(directContext.window().maxTimestamp())) {
         // The hold must be for garbage collection, which can't have happened yet.
         Preconditions.checkState(
-          newHold.isEqual(
-            directContext.window().maxTimestamp().plus(windowingStrategy.getAllowedLateness())),
+          newHold.isEqual(garbageCollectionTime(directContext.window())),
           "new hold %s should be at garbage collection for window %s plus %s",
           newHold,
           directContext.window(),
@@ -815,6 +871,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
       reduceFn.onTrigger(renamedTriggerContext);
     }
+
+    return newHold;
   }
 
   /**
@@ -838,39 +896,56 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
       ReduceFn<?, ?, ?, W>.Context directContext) {
     Instant inputWM = timerInternals.currentInputWatermarkTime();
     Instant endOfWindow = directContext.window().maxTimestamp();
-    Instant fireTime;
     String which;
+    Instant timer;
     if (endOfWindow.isBefore(inputWM)) {
-      fireTime = endOfWindow.plus(windowingStrategy.getAllowedLateness());
+      timer = garbageCollectionTime(directContext.window());
       which = "garbage collection";
     } else {
-      fireTime = endOfWindow;
+      timer = endOfWindow;
       which = "end-of-window";
     }
     WindowTracing.trace(
         "ReduceFnRunner.scheduleEndOfWindowOrGarbageCollectionTimer: Scheduling {} timer at {} for "
-            + "key:{}; window:{} where inputWatermark:{}; outputWatermark:{}",
+        + "key:{}; window:{} where inputWatermark:{}; outputWatermark:{}",
         which,
-        fireTime,
+        timer,
         key,
         directContext.window(),
         inputWM,
         timerInternals.currentOutputWatermarkTime());
-    directContext.timers().setTimer(fireTime, TimeDomain.EVENT_TIME);
-    return fireTime;
+    Preconditions.checkState(!timer.isAfter(BoundedWindow.TIMESTAMP_MAX_VALUE),
+                             "Timer %s is beyond end-of-time", timer);
+    directContext.timers().setTimer(timer, TimeDomain.EVENT_TIME);
+    return timer;
   }
 
-  private void cancelEndOfWindowAndGarbageCollectionTimers(ReduceFn<?, ?, ?, W>.Context context) {
+  private void cancelEndOfWindowAndGarbageCollectionTimers(
+      ReduceFn<?, ?, ?, W>.Context directContext) {
     WindowTracing.debug(
         "ReduceFnRunner.cancelEndOfWindowAndGarbageCollectionTimers: Deleting timers for "
         + "key:{}; window:{} where inputWatermark:{}; outputWatermark:{}",
-        key, context.window(), timerInternals.currentInputWatermarkTime(),
+        key, directContext.window(), timerInternals.currentInputWatermarkTime(),
         timerInternals.currentOutputWatermarkTime());
-    Instant timer = context.window().maxTimestamp();
-    context.timers().deleteTimer(timer, TimeDomain.EVENT_TIME);
-    if (windowingStrategy.getAllowedLateness().isLongerThan(Duration.ZERO)) {
-      timer = timer.plus(windowingStrategy.getAllowedLateness());
-      context.timers().deleteTimer(timer, TimeDomain.EVENT_TIME);
+    Instant eow = directContext.window().maxTimestamp();
+    directContext.timers().deleteTimer(eow, TimeDomain.EVENT_TIME);
+    Instant gc = garbageCollectionTime(directContext.window());
+    if (gc.isAfter(eow)) {
+      directContext.timers().deleteTimer(eow, TimeDomain.EVENT_TIME);
+    }
+  }
+
+  /**
+   * Return when {@code window} should be garbage collected. If the window is the GlobalWindow,
+   * that will be the end of the window. Otherwise, add the allowed lateness to the end of
+   * the window.
+   */
+  private Instant garbageCollectionTime(W window) {
+    Instant maxTimestamp = window.maxTimestamp();
+    if (maxTimestamp.isBefore(GlobalWindow.INSTANCE.maxTimestamp())) {
+      return maxTimestamp.plus(windowingStrategy.getAllowedLateness());
+    } else {
+      return maxTimestamp;
     }
   }
 

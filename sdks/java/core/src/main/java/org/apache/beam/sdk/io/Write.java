@@ -39,6 +39,7 @@ import org.apache.beam.sdk.values.PDone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.UUID;
 
 /**
@@ -86,7 +87,8 @@ public class Write {
     public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
       builder
-          .add(DisplayData.item("sink", sink.getClass()))
+          .add(DisplayData.item("sink", sink.getClass())
+            .withLabel("Write Sink"))
           .include(sink);
     }
 
@@ -190,6 +192,7 @@ public class Write {
                 // Discard write result and close the write.
                 try {
                   writer.close();
+                  // The writer does not need to be reset, as this DoFn cannot be reused
                 } catch (Exception closeException) {
                   // Do not mask the exception that caused the write to fail.
                 }
@@ -202,7 +205,14 @@ public class Write {
               if (writer != null) {
                 WriteT result = writer.close();
                 c.output(result);
+                // Reset state in case of reuse
+                writer = null;
               }
+            }
+
+            @Override
+            public void populateDisplayData(DisplayData.Builder builder) {
+              Write.Bound.this.populateDisplayData(builder);
             }
           }).withSideInputs(writeOperationView))
           .setCoder(writeOperation.getWriterResultCoder());
@@ -224,6 +234,14 @@ public class Write {
               LOG.info("Finalizing write operation {}", writeOperation);
               Iterable<WriteT> results = c.sideInput(resultsView);
               LOG.debug("Side input initialized to finalize write operation {}", writeOperation);
+              if (!results.iterator().hasNext()) {
+                LOG.info("No write results, creating a single empty output.");
+                Writer<T, WriteT> writer = writeOperation.createWriter(c.getPipelineOptions());
+                writer.open(UUID.randomUUID().toString());
+                WriteT emptyWrite = writer.close();
+                results = Collections.singleton(emptyWrite);
+                LOG.debug("Done creating a single empty output.");
+              }
               writeOperation.finalize(results, c.getPipelineOptions());
               LOG.debug("Done finalizing write operation {}", writeOperation);
             }

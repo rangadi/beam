@@ -17,18 +17,6 @@
  */
 package org.apache.beam.runners.spark.translation.streaming;
 
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import com.google.api.client.util.Lists;
-import com.google.api.client.util.Maps;
-import com.google.api.client.util.Sets;
-import com.google.common.reflect.TypeToken;
-import kafka.serializer.Decoder;
 import org.apache.beam.runners.spark.io.ConsoleIO;
 import org.apache.beam.runners.spark.io.CreateStream;
 import org.apache.beam.runners.spark.io.KafkaIO;
@@ -40,7 +28,6 @@ import org.apache.beam.runners.spark.translation.TransformEvaluator;
 import org.apache.beam.runners.spark.translation.TransformTranslator;
 import org.apache.beam.runners.spark.translation.WindowingHelpers;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.AvroIO;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.transforms.AppliedPTransform;
@@ -58,6 +45,12 @@ import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PDone;
+
+import com.google.api.client.util.Lists;
+import com.google.api.client.util.Maps;
+import com.google.api.client.util.Sets;
+import com.google.common.reflect.TypeToken;
+
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.api.java.function.VoidFunction;
@@ -68,6 +61,15 @@ import org.apache.spark.streaming.api.java.JavaDStreamLike;
 import org.apache.spark.streaming.api.java.JavaPairInputDStream;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
 import org.apache.spark.streaming.kafka.KafkaUtils;
+
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import kafka.serializer.Decoder;
 import scala.Tuple2;
 
 
@@ -126,18 +128,7 @@ public final class StreamingTransformTranslator {
         StreamingEvaluationContext sec = (StreamingEvaluationContext) context;
         Iterable<T> elems = transform.getElements();
         Coder<T> coder = sec.getOutput(transform).getCoder();
-        if (coder != VoidCoder.of()) {
-          // actual create
-          sec.setOutputRDDFromValues(transform, elems, coder);
-        } else {
-          // fake create as an input
-          // creates a stream with a single batch containing a single null element
-          // to invoke following transformations once
-          // to support PAssert
-          sec.setDStreamFromQueue(transform,
-              Collections.<Iterable<Void>>singletonList(Collections.singletonList((Void) null)),
-              (Coder<Void>) coder);
-        }
+        sec.setDStreamFromQueue(transform, Collections.singletonList(elems), coder);
       }
     };
   }
@@ -173,14 +164,14 @@ public final class StreamingTransformTranslator {
     };
   }
 
-  private static <PT extends PTransform<?, ?>> TransformEvaluator<PT> rddTransform(
+  private static <TransformT extends PTransform<?, ?>> TransformEvaluator<TransformT> rddTransform(
       final SparkPipelineTranslator rddTranslator) {
-    return new TransformEvaluator<PT>() {
+    return new TransformEvaluator<TransformT>() {
       @SuppressWarnings("unchecked")
       @Override
-      public void evaluate(PT transform, EvaluationContext context) {
-        TransformEvaluator<PT> rddEvaluator =
-            rddTranslator.translate((Class<PT>) transform.getClass());
+      public void evaluate(TransformT transform, EvaluationContext context) {
+        TransformEvaluator<TransformT> rddEvaluator =
+            rddTranslator.translate((Class<TransformT>) transform.getClass());
 
         StreamingEvaluationContext sec = (StreamingEvaluationContext) context;
         if (sec.hasStream(transform)) {
@@ -203,19 +194,20 @@ public final class StreamingTransformTranslator {
    * RDD transform function If the transformation function doesn't have an input, create a fake one
    * as an empty RDD.
    *
-   * @param <PT> PTransform type
+   * @param <TransformT> PTransform type
    */
-  private static final class RDDTransform<PT extends PTransform<?, ?>>
+  private static final class RDDTransform<TransformT extends PTransform<?, ?>>
       implements Function<JavaRDD<WindowedValue<Object>>, JavaRDD<WindowedValue<Object>>> {
 
     private final StreamingEvaluationContext context;
     private final AppliedPTransform<?, ?, ?> appliedPTransform;
-    private final TransformEvaluator<PT> rddEvaluator;
-    private final PT transform;
+    private final TransformEvaluator<TransformT> rddEvaluator;
+    private final TransformT transform;
 
 
-    private RDDTransform(StreamingEvaluationContext context, TransformEvaluator<PT> rddEvaluator,
-        PT transform) {
+    private RDDTransform(StreamingEvaluationContext context,
+                         TransformEvaluator<TransformT> rddEvaluator,
+        TransformT transform) {
       this.context = context;
       this.appliedPTransform = context.getCurrentTransform();
       this.rddEvaluator = rddEvaluator;
@@ -243,13 +235,13 @@ public final class StreamingTransformTranslator {
   }
 
   @SuppressWarnings("unchecked")
-  private static <PT extends PTransform<?, ?>> TransformEvaluator<PT> foreachRDD(
+  private static <TransformT extends PTransform<?, ?>> TransformEvaluator<TransformT> foreachRDD(
       final SparkPipelineTranslator rddTranslator) {
-    return new TransformEvaluator<PT>() {
+    return new TransformEvaluator<TransformT>() {
       @Override
-      public void evaluate(PT transform, EvaluationContext context) {
-        TransformEvaluator<PT> rddEvaluator =
-            rddTranslator.translate((Class<PT>) transform.getClass());
+      public void evaluate(TransformT transform, EvaluationContext context) {
+        TransformEvaluator<TransformT> rddEvaluator =
+            rddTranslator.translate((Class<TransformT>) transform.getClass());
 
         StreamingEvaluationContext sec = (StreamingEvaluationContext) context;
         if (sec.hasStream(transform)) {
@@ -268,19 +260,19 @@ public final class StreamingTransformTranslator {
   /**
    * RDD output function.
    *
-   * @param <PT> PTransform type
+   * @param <TransformT> PTransform type
    */
-  private static final class RDDOutputOperator<PT extends PTransform<?, ?>>
+  private static final class RDDOutputOperator<TransformT extends PTransform<?, ?>>
       implements VoidFunction<JavaRDD<WindowedValue<Object>>> {
 
     private final StreamingEvaluationContext context;
     private final AppliedPTransform<?, ?, ?> appliedPTransform;
-    private final TransformEvaluator<PT> rddEvaluator;
-    private final PT transform;
+    private final TransformEvaluator<TransformT> rddEvaluator;
+    private final TransformT transform;
 
 
     private RDDOutputOperator(StreamingEvaluationContext context,
-        TransformEvaluator<PT> rddEvaluator, PT transform) {
+                              TransformEvaluator<TransformT> rddEvaluator, TransformT transform) {
       this.context = context;
       this.appliedPTransform = context.getCurrentTransform();
       this.rddEvaluator = rddEvaluator;
@@ -325,7 +317,7 @@ public final class StreamingTransformTranslator {
         //--- then we apply windowing to the elements
         DoFn<T, T> addWindowsDoFn = new AssignWindowsDoFn<>(windowFn);
         DoFnFunction<T, T> dofn = new DoFnFunction<>(addWindowsDoFn,
-            ((StreamingEvaluationContext)context).getRuntimeContext(), null);
+            ((StreamingEvaluationContext) context).getRuntimeContext(), null);
         @SuppressWarnings("unchecked")
         JavaDStreamLike<WindowedValue<T>, ?, JavaRDD<WindowedValue<T>>> dstream =
             (JavaDStreamLike<WindowedValue<T>, ?, JavaRDD<WindowedValue<T>>>)
@@ -361,9 +353,10 @@ public final class StreamingTransformTranslator {
   }
 
   @SuppressWarnings("unchecked")
-  private static <PT extends PTransform<?, ?>> TransformEvaluator<PT>
-      getTransformEvaluator(Class<PT> clazz, SparkPipelineTranslator rddTranslator) {
-    TransformEvaluator<PT> transform = (TransformEvaluator<PT>) EVALUATORS.get(clazz);
+  private static <TransformT extends PTransform<?, ?>> TransformEvaluator<TransformT>
+      getTransformEvaluator(Class<TransformT> clazz, SparkPipelineTranslator rddTranslator) {
+    TransformEvaluator<TransformT> transform =
+        (TransformEvaluator<TransformT>) EVALUATORS.get(clazz);
     if (transform == null) {
       if (UNSUPPORTED_EVALUATORS.contains(clazz)) {
         throw new UnsupportedOperationException("Dataflow transformation " + clazz
@@ -383,7 +376,8 @@ public final class StreamingTransformTranslator {
     return transform;
   }
 
-  private static <PT extends PTransform<?, ?>> Class<?> getPTransformOutputClazz(Class<PT> clazz) {
+  private static <TransformT extends PTransform<?, ?>> Class<?>
+  getPTransformOutputClazz(Class<TransformT> clazz) {
     Type[] types = ((ParameterizedType) clazz.getGenericSuperclass()).getActualTypeArguments();
     return TypeToken.of(clazz).resolveType(types[1]).getRawType();
   }
@@ -407,7 +401,8 @@ public final class StreamingTransformTranslator {
     }
 
     @Override
-    public <PT extends PTransform<?, ?>> TransformEvaluator<PT> translate(Class<PT> clazz) {
+    public <TransformT extends PTransform<?, ?>> TransformEvaluator<TransformT>
+    translate(Class<TransformT> clazz) {
       return getTransformEvaluator(clazz, rddTranslator);
     }
   }

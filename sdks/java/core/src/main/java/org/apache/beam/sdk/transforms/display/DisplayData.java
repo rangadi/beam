@@ -599,11 +599,31 @@ public class DisplayData implements Serializable {
       if (newComponent) {
         String prevNs = this.latestNs;
         this.latestNs = namespace;
-        subComponent.populateDisplayData(this);
+
+        try {
+          subComponent.populateDisplayData(this);
+        } catch (PopulateDisplayDataException e) {
+          // Don't re-wrap exceptions recursively.
+          throw e;
+        } catch (Throwable e) {
+          String msg = String.format("Error while populating display data for component: %s",
+              namespace);
+          throw new PopulateDisplayDataException(msg, e);
+        }
+
         this.latestNs = prevNs;
       }
 
       return this;
+    }
+
+    /**
+     * Marker exception class for exceptions encountered while populating display data.
+     */
+    private class PopulateDisplayDataException extends RuntimeException {
+      PopulateDisplayDataException(String message, Throwable cause) {
+        super(message, cause);
+      }
     }
 
     @Override

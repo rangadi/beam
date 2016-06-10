@@ -84,7 +84,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * {@link PipelineOptions#as(Class)}.
  */
 @ThreadSafe
-class ProxyInvocationHandler implements InvocationHandler {
+class ProxyInvocationHandler implements InvocationHandler, HasDisplayData {
   private static final ObjectMapper MAPPER = new ObjectMapper();
   /**
    * No two instances of this class are considered equivalent hence we generate a random hash code
@@ -141,7 +141,8 @@ class ProxyInvocationHandler implements InvocationHandler {
         && args[0] instanceof DisplayData.Builder) {
       @SuppressWarnings("unchecked")
       DisplayData.Builder builder = (DisplayData.Builder) args[0];
-      populateDisplayData(builder);
+      // Explicitly set display data namespace so thrown exceptions will have sensible type.
+      builder.include(this, PipelineOptions.class);
       return Void.TYPE;
     }
     String methodName = method.getName();
@@ -266,7 +267,7 @@ class ProxyInvocationHandler implements InvocationHandler {
    * Populate display data. See {@link HasDisplayData#populateDisplayData}. All explicitly set
    * pipeline options will be added as display data.
    */
-  private void populateDisplayData(DisplayData.Builder builder) {
+  public void populateDisplayData(DisplayData.Builder builder) {
     Set<PipelineOptionSpec> optionSpecs = PipelineOptionsReflector.getOptionSpecs(knownInterfaces);
     Multimap<String, PipelineOptionSpec> optionsMap = buildOptionNameToSpecMap(optionSpecs);
 
@@ -281,6 +282,12 @@ class ProxyInvocationHandler implements InvocationHandler {
       HashSet<PipelineOptionSpec> specs = new HashSet<>(optionsMap.get(option.getKey()));
 
       for (PipelineOptionSpec optionSpec : specs) {
+        if (!optionSpec.shouldSerialize()) {
+          // Options that are excluded for serialization (i.e. those with @JsonIgnore) are also
+          // excluded from display data. These options are generally not useful for display.
+          continue;
+        }
+
         Class<?> pipelineInterface = optionSpec.getDefiningInterface();
         if (type != null) {
           builder.add(DisplayData.item(option.getKey(), type, value)
@@ -304,7 +311,12 @@ class ProxyInvocationHandler implements InvocationHandler {
           .withNamespace(UnknownPipelineOptions.class));
       } else {
         for (PipelineOptionSpec spec : specs) {
+          if (!spec.shouldSerialize()) {
+            continue;
+          }
+
           Object value = getValueFromJson(jsonOption.getKey(), spec.getGetterMethod());
+          value = value == null ? "" : value;
           DisplayData.Type type = DisplayData.inferType(value);
           if (type != null) {
             builder.add(DisplayData.item(jsonOption.getKey(), type, value)
@@ -542,7 +554,8 @@ class ProxyInvocationHandler implements InvocationHandler {
         jgen.writeObject(serializableOptions);
 
         List<Map<String, Object>> serializedDisplayData = Lists.newArrayList();
-        for (DisplayData.Item<?> item : DisplayData.from(value).items()) {
+        DisplayData displayData = DisplayData.from(value);
+        for (DisplayData.Item<?> item : displayData.items()) {
           @SuppressWarnings("unchecked")
           Map<String, Object> serializedItem = MAPPER.convertValue(item, Map.class);
           serializedDisplayData.add(serializedItem);

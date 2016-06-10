@@ -144,8 +144,8 @@ public class TestDataflowPipelineRunner extends PipelineRunner<DataflowPipelineJ
         throw new IllegalStateException(
             "The dataflow did not output a success or failure metric.");
       } else if (!result.get()) {
-        throw new AssertionError(messageHandler.getErrorMessage() == null ?
-            "The dataflow did not return a failure reason."
+        throw new AssertionError(messageHandler.getErrorMessage() == null
+            ? "The dataflow did not return a failure reason."
             : messageHandler.getErrorMessage());
       } else {
         assertThat(job, testPipelineOptions.getOnSuccessMatcher());
@@ -166,7 +166,8 @@ public class TestDataflowPipelineRunner extends PipelineRunner<DataflowPipelineJ
   public <OutputT extends POutput, InputT extends PInput> OutputT apply(
       PTransform<InputT, OutputT> transform, InputT input) {
     if (transform instanceof PAssert.OneSideInputAssert
-        || transform instanceof PAssert.TwoSideInputAssert) {
+        || transform instanceof PAssert.GroupThenAssert
+        || transform instanceof PAssert.GroupThenAssertForSingleton) {
       expectedNumberOfAssertions += 1;
     }
 

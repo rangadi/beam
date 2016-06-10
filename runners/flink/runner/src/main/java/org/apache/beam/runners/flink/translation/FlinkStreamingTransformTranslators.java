@@ -18,7 +18,6 @@
 
 package org.apache.beam.runners.flink.translation;
 
-import org.apache.beam.runners.flink.translation.functions.UnionCoder;
 import org.apache.beam.runners.flink.translation.types.CoderTypeInformation;
 import org.apache.beam.runners.flink.translation.types.FlinkCoder;
 import org.apache.beam.runners.flink.translation.wrappers.SourceInputFormat;
@@ -36,6 +35,7 @@ import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.io.Sink;
 import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.Write;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
@@ -45,6 +45,7 @@ import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.join.RawUnionValue;
+import org.apache.beam.sdk.transforms.join.UnionCoder;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
@@ -228,29 +229,15 @@ public class FlinkStreamingTransformTranslators {
       BoundedSource<T> boundedSource = transform.getSource();
       PCollection<T> output = context.getOutput(transform);
 
-      Coder<T> defaultOutputCoder = boundedSource.getDefaultOutputCoder();
-      CoderTypeInformation<T> typeInfo = new CoderTypeInformation<>(defaultOutputCoder);
+      TypeInformation<WindowedValue<T>> typeInfo = context.getTypeInfo(output);
 
-      DataStream<T> source = context.getExecutionEnvironment().createInput(
+      DataStream<WindowedValue<T>> source = context.getExecutionEnvironment().createInput(
           new SourceInputFormat<>(
               boundedSource,
               context.getPipelineOptions()),
           typeInfo);
 
-      DataStream<WindowedValue<T>> windowedStream = source.flatMap(
-          new FlatMapFunction<T, WindowedValue<T>>() {
-            @Override
-            public void flatMap(T value, Collector<WindowedValue<T>> out) throws Exception {
-              out.collect(
-                  WindowedValue.of(value,
-                    Instant.now(),
-                    GlobalWindow.INSTANCE,
-                    PaneInfo.NO_FIRING));
-            }
-          })
-          .assignTimestampsAndWatermarks(new IngestionTimeExtractor<WindowedValue<T>>());
-
-      context.setOutputDataStream(output, windowedStream);
+      context.setOutputDataStream(output, source);
     }
   }
 
@@ -284,8 +271,17 @@ public class FlinkStreamingTransformTranslators {
               }
             }).assignTimestampsAndWatermarks(new IngestionTimeExtractor<WindowedValue<T>>());
       } else {
-        source = context.getExecutionEnvironment()
-            .addSource(new UnboundedSourceWrapper<>(context.getPipelineOptions(), transform));
+        try {
+          transform.getSource();
+          UnboundedSourceWrapper<T, ?> sourceWrapper =
+              new UnboundedSourceWrapper<>(
+                  context.getPipelineOptions(),
+                  transform.getSource(),
+                  context.getExecutionEnvironment().getParallelism());
+          source = context.getExecutionEnvironment().addSource(sourceWrapper).name(transform.getName());
+        } catch (Exception e) {
+          throw new RuntimeException("Error while translating UnboundedSource: " + transform.getSource(), e);
+        }
       }
 
       context.setOutputDataStream(output, source);
@@ -310,7 +306,9 @@ public class FlinkStreamingTransformTranslators {
       FlinkParDoBoundWrapper<IN, OUT> doFnWrapper = new FlinkParDoBoundWrapper<>(
           context.getPipelineOptions(), windowingStrategy, transform.getFn());
       DataStream<WindowedValue<IN>> inputDataStream = context.getInputDataStream(context.getInput(transform));
-      SingleOutputStreamOperator<WindowedValue<OUT>> outDataStream = inputDataStream.flatMap(doFnWrapper)
+      SingleOutputStreamOperator<WindowedValue<OUT>> outDataStream = inputDataStream
+          .flatMap(doFnWrapper)
+          .name(transform.getName())
           .returns(outputWindowedValueCoder);
 
       context.setOutputDataStream(context.getOutput(transform), outDataStream);

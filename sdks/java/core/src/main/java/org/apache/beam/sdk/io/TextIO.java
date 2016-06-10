@@ -344,9 +344,12 @@ public class TextIO {
         super.populateDisplayData(builder);
 
         builder
-            .add(DisplayData.item("compressionType", compressionType.toString()))
-            .addIfNotDefault(DisplayData.item("validation", validate), true)
-            .addIfNotNull(DisplayData.item("filePattern", filepattern));
+            .add(DisplayData.item("compressionType", compressionType.toString())
+              .withLabel("Compression Type"))
+            .addIfNotDefault(DisplayData.item("validation", validate)
+              .withLabel("Validation Enabled"), true)
+            .addIfNotNull(DisplayData.item("filePattern", filepattern)
+              .withLabel("File Pattern"));
       }
 
       @Override
@@ -649,13 +652,17 @@ public class TextIO {
         super.populateDisplayData(builder);
 
         builder
-            .addIfNotNull(DisplayData.item("filePrefix", filenamePrefix))
-            .addIfNotDefault(DisplayData.item("fileSuffix", filenameSuffix), "")
-            .addIfNotDefault(
-                DisplayData.item("shardNameTemplate", shardTemplate),
+            .addIfNotNull(DisplayData.item("filePrefix", filenamePrefix)
+              .withLabel("Output File Prefix"))
+            .addIfNotDefault(DisplayData.item("fileSuffix", filenameSuffix)
+              .withLabel("Output Fix Suffix"), "")
+            .addIfNotDefault(DisplayData.item("shardNameTemplate", shardTemplate)
+              .withLabel("Output Shard Name Template"),
                 DEFAULT_SHARD_TEMPLATE)
-            .addIfNotDefault(DisplayData.item("validation", validate), true)
-            .addIfNotDefault(DisplayData.item("numShards", numShards), 0);
+            .addIfNotDefault(DisplayData.item("validation", validate)
+              .withLabel("Validation Enabled"), true)
+            .addIfNotDefault(DisplayData.item("numShards", numShards)
+              .withLabel("Maximum Output Shards"), 0);
       }
 
       /**
@@ -810,9 +817,10 @@ public class TextIO {
       private ByteString buffer;
       private int startOfSeparatorInBuffer;
       private int endOfSeparatorInBuffer;
-      private long startOfNextRecord;
-      private boolean eof;
-      private boolean elementIsPresent;
+      private long startOfRecord;
+      private volatile long startOfNextRecord;
+      private volatile boolean eof;
+      private volatile boolean elementIsPresent;
       private T currentValue;
       private ReadableByteChannel inChannel;
 
@@ -827,7 +835,15 @@ public class TextIO {
         if (!elementIsPresent) {
           throw new NoSuchElementException();
         }
-        return startOfNextRecord;
+        return startOfRecord;
+      }
+
+      @Override
+      public long getSplitPointsRemaining() {
+        if (isStarted() && startOfNextRecord >= getCurrentSource().getEndOffset()) {
+          return isDone() ? 0 : 1;
+        }
+        return super.getSplitPointsRemaining();
       }
 
       @Override
@@ -905,7 +921,7 @@ public class TextIO {
 
       @Override
       protected boolean readNextRecord() throws IOException {
-        startOfNextRecord += endOfSeparatorInBuffer;
+        startOfRecord = startOfNextRecord;
         findSeparatorBounds();
 
         // If we have reached EOF file and consumed all of the buffer then we know
@@ -916,6 +932,7 @@ public class TextIO {
         }
 
         decodeCurrentElement();
+        startOfNextRecord = startOfRecord + endOfSeparatorInBuffer;
         return true;
       }
 

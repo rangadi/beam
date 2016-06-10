@@ -17,7 +17,6 @@
  */
 package org.apache.beam.runners.flink;
 
-import org.apache.beam.runners.dataflow.DataflowPipelineRunner;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -46,7 +45,6 @@ import java.util.Map;
  * pipeline by first translating them to a Flink Plan and then executing them either locally
  * or on a Flink cluster, depending on the configuration.
  * <p>
- * This is based on {@link org.apache.beam.runners.dataflow.DataflowPipelineRunner}.
  */
 public class FlinkPipelineRunner extends PipelineRunner<FlinkRunnerResult> {
 
@@ -56,8 +54,6 @@ public class FlinkPipelineRunner extends PipelineRunner<FlinkRunnerResult> {
    * Provided options.
    */
   private final FlinkPipelineOptions options;
-
-  private final FlinkPipelineExecutionEnvironment flinkJobEnv;
 
   /**
    * Construct a runner from the provided options.
@@ -80,7 +76,7 @@ public class FlinkPipelineRunner extends PipelineRunner<FlinkRunnerResult> {
 
     if (flinkOptions.getFilesToStage() == null) {
       flinkOptions.setFilesToStage(detectClassPathResourcesToStage(
-          DataflowPipelineRunner.class.getClassLoader()));
+          FlinkPipelineRunner.class.getClassLoader()));
       LOG.info("PipelineOptions.filesToStage was not specified. "
               + "Defaulting to files from the classpath: will stage {} files. "
               + "Enable logging at DEBUG level to see which files will be staged.",
@@ -98,22 +94,21 @@ public class FlinkPipelineRunner extends PipelineRunner<FlinkRunnerResult> {
 
   private FlinkPipelineRunner(FlinkPipelineOptions options) {
     this.options = options;
-    this.flinkJobEnv = new FlinkPipelineExecutionEnvironment(options);
   }
 
   @Override
   public FlinkRunnerResult run(Pipeline pipeline) {
     LOG.info("Executing pipeline using FlinkPipelineRunner.");
 
+    FlinkPipelineExecutionEnvironment env = new FlinkPipelineExecutionEnvironment(options);
+
     LOG.info("Translating pipeline to Flink program.");
+    env.translate(pipeline);
 
-    this.flinkJobEnv.translate(pipeline);
-
-    LOG.info("Starting execution of Flink program.");
-    
     JobExecutionResult result;
     try {
-      result = this.flinkJobEnv.executePipeline();
+      LOG.info("Starting execution of Flink program.");
+      result = env.executePipeline();
     } catch (Exception e) {
       LOG.error("Pipeline execution failed", e);
       throw new RuntimeException("Pipeline execution failed", e);
@@ -138,20 +133,6 @@ public class FlinkPipelineRunner extends PipelineRunner<FlinkRunnerResult> {
    */
   public FlinkPipelineOptions getPipelineOptions() {
     return options;
-  }
-
-  /**
-   * Constructs a runner with default properties for testing.
-   *
-   * @return The newly created runner.
-   */
-  public static FlinkPipelineRunner createForTest(boolean streaming) {
-    FlinkPipelineOptions options = PipelineOptionsFactory.as(FlinkPipelineOptions.class);
-    // we use [auto] for testing since this will make it pick up the Testing
-    // ExecutionEnvironment
-    options.setFlinkMaster("[auto]");
-    options.setStreaming(streaming);
-    return new FlinkPipelineRunner(options);
   }
 
   @Override

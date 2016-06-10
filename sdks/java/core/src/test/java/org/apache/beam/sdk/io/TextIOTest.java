@@ -22,10 +22,10 @@ import static org.apache.beam.sdk.TestUtils.LINES_ARRAY;
 import static org.apache.beam.sdk.TestUtils.NO_INTS_ARRAY;
 import static org.apache.beam.sdk.TestUtils.NO_LINES_ARRAY;
 import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.hasDisplayItem;
-
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -34,9 +34,11 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.TextualIntegerCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
+import org.apache.beam.sdk.io.BoundedSource.BoundedReader;
 import org.apache.beam.sdk.io.TextIO.CompressionType;
 import org.apache.beam.sdk.io.TextIO.TextSource;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -52,6 +54,7 @@ import com.google.common.collect.ImmutableList;
 
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
@@ -73,6 +76,7 @@ import java.util.zip.GZIPOutputStream;
 /**
  * Tests for TextIO Read and Write transforms.
  */
+// TODO: Change the tests to use RunnableOnService instead of NeedsRunner
 @RunWith(JUnit4.class)
 @SuppressWarnings("unchecked")
 public class TextIOTest {
@@ -109,26 +113,31 @@ public class TextIOTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testReadStrings() throws Exception {
     runTestRead(LINES_ARRAY, StringUtf8Coder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testReadEmptyStrings() throws Exception {
     runTestRead(NO_LINES_ARRAY, StringUtf8Coder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testReadInts() throws Exception {
     runTestRead(INTS_ARRAY, TextualIntegerCoder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testReadEmptyInts() throws Exception {
     runTestRead(NO_INTS_ARRAY, TextualIntegerCoder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testReadNulls() throws Exception {
     runTestRead(new Void[]{ null, null, null }, VoidCoder.of());
   }
@@ -193,15 +202,17 @@ public class TextIOTest {
     }
     if (numShards == 1) {
       write = write.withoutSharding();
-    } else {
+    } else if (numShards > 0) {
       write = write.withNumShards(numShards).withShardNameTemplate(ShardNameTemplate.INDEX_OF_MAX);
     }
+    int numOutputShards = (numShards > 0) ? numShards : 1;
 
     input.apply(write);
 
     p.run();
 
-    assertOutputFiles(elems, coder, numShards, tmpFolder, outputName, write.getShardNameTemplate());
+    assertOutputFiles(elems, coder, numOutputShards, tmpFolder, outputName,
+        write.getShardNameTemplate());
   }
 
   public static <T> void assertOutputFiles(
@@ -245,21 +256,31 @@ public class TextIOTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testWriteStrings() throws Exception {
     runTestWrite(LINES_ARRAY, StringUtf8Coder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
+  public void testWriteEmptyStringsNoSharding() throws Exception {
+    runTestWrite(NO_LINES_ARRAY, StringUtf8Coder.of(), 0);
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
   public void testWriteEmptyStrings() throws Exception {
     runTestWrite(NO_LINES_ARRAY, StringUtf8Coder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testWriteInts() throws Exception {
     runTestWrite(INTS_ARRAY, TextualIntegerCoder.of());
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testWriteEmptyInts() throws Exception {
     runTestWrite(NO_INTS_ARRAY, TextualIntegerCoder.of());
   }
@@ -286,6 +307,7 @@ public class TextIOTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testShardedWrite() throws Exception {
     runTestWrite(LINES_ARRAY, StringUtf8Coder.of(), 5);
   }
@@ -363,6 +385,7 @@ public class TextIOTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testCompressedRead() throws Exception {
     String[] lines = {"Irritable eagle", "Optimistic jay", "Fanciful hawk"};
     File tmpFile = tmpFolder.newFile();
@@ -388,6 +411,7 @@ public class TextIOTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testGZIPReadWhenUncompressed() throws Exception {
     String[] lines = {"Meritorious condor", "Obnoxious duck"};
     File tmpFile = tmpFolder.newFile();
@@ -420,6 +444,117 @@ public class TextIOTest {
     assertEquals("TextIO.Read", TextIO.Read.from("somefile").toString());
     assertEquals(
         "ReadMyFile [TextIO.Read]", TextIO.Read.named("ReadMyFile").from("somefile").toString());
+  }
+
+  @Test
+  public void testProgressEmptyFile() throws IOException {
+    try (BoundedReader<String> reader =
+        prepareSource(new byte[0]).createReader(PipelineOptionsFactory.create())) {
+      // Check preconditions before starting.
+      assertEquals(0.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // Assert empty
+      assertFalse(reader.start());
+
+      // Check postconditions after finishing
+      assertEquals(1.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(0, reader.getSplitPointsRemaining());
+    }
+  }
+
+  @Test
+  public void testProgressTextFile() throws IOException {
+    String file = "line1\nline2\nline3";
+    try (BoundedReader<String> reader =
+        prepareSource(file.getBytes()).createReader(PipelineOptionsFactory.create())) {
+      // Check preconditions before starting
+      assertEquals(0.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // Line 1
+      assertTrue(reader.start());
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // Line 2
+      assertTrue(reader.advance());
+      assertEquals(1, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // Line 3
+      assertTrue(reader.advance());
+      assertEquals(2, reader.getSplitPointsConsumed());
+      assertEquals(1, reader.getSplitPointsRemaining());
+
+      // Check postconditions after finishing
+      assertFalse(reader.advance());
+      assertEquals(1.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(3, reader.getSplitPointsConsumed());
+      assertEquals(0, reader.getSplitPointsRemaining());
+    }
+  }
+
+  @Test
+  public void testProgressAfterSplitting() throws IOException {
+    String file = "line1\nline2\nline3";
+    BoundedSource source = prepareSource(file.getBytes());
+    BoundedSource remainder;
+
+    // Create the remainder, verifying properties pre- and post-splitting.
+    try (BoundedReader<String> readerOrig = source.createReader(PipelineOptionsFactory.create())) {
+      // Preconditions.
+      assertEquals(0.0, readerOrig.getFractionConsumed(), 1e-6);
+      assertEquals(0, readerOrig.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, readerOrig.getSplitPointsRemaining());
+
+      // First record, before splitting.
+      assertTrue(readerOrig.start());
+      assertEquals(0, readerOrig.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, readerOrig.getSplitPointsRemaining());
+
+      // Split. 0.1 is in line1, so should now be able to detect last record.
+      remainder = readerOrig.splitAtFraction(0.1);
+      System.err.println(readerOrig.getCurrentSource());
+      assertNotNull(remainder);
+
+      // First record, after splitting.
+      assertEquals(0, readerOrig.getSplitPointsConsumed());
+      assertEquals(1, readerOrig.getSplitPointsRemaining());
+
+      // Finish and postconditions.
+      assertFalse(readerOrig.advance());
+      assertEquals(1.0, readerOrig.getFractionConsumed(), 1e-6);
+      assertEquals(1, readerOrig.getSplitPointsConsumed());
+      assertEquals(0, readerOrig.getSplitPointsRemaining());
+    }
+
+    // Check the properties of the remainder.
+    try (BoundedReader<String> reader = remainder.createReader(PipelineOptionsFactory.create())) {
+      // Preconditions.
+      assertEquals(0.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // First record should be line 2.
+      assertTrue(reader.start());
+      assertEquals(0, reader.getSplitPointsConsumed());
+      assertEquals(BoundedReader.SPLIT_POINTS_UNKNOWN, reader.getSplitPointsRemaining());
+
+      // Second record is line 3
+      assertTrue(reader.advance());
+      assertEquals(1, reader.getSplitPointsConsumed());
+      assertEquals(1, reader.getSplitPointsRemaining());
+
+      // Check postconditions after finishing
+      assertFalse(reader.advance());
+      assertEquals(1.0, reader.getFractionConsumed(), 1e-6);
+      assertEquals(2, reader.getSplitPointsConsumed());
+      assertEquals(0, reader.getSplitPointsRemaining());
+    }
   }
 
   @Test

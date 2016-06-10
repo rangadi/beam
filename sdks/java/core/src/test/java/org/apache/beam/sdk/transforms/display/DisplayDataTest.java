@@ -30,6 +30,7 @@ import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.isA;
 import static org.hamcrest.Matchers.isEmptyOrNullString;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -39,7 +40,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
+import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.display.DisplayData.Builder;
 import org.apache.beam.sdk.transforms.display.DisplayData.Item;
 import org.apache.beam.sdk.values.PCollection;
@@ -67,6 +70,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.Collection;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -75,8 +79,9 @@ import java.util.regex.Pattern;
  * Tests for {@link DisplayData} class.
  */
 @RunWith(JUnit4.class)
-public class DisplayDataTest {
-  @Rule public ExpectedException thrown = ExpectedException.none();
+public class DisplayDataTest implements Serializable {
+  @Rule public transient ExpectedException thrown = ExpectedException.none();
+
   private static final DateTimeFormatter ISO_FORMATTER = ISODateTimeFormat.dateTime();
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -404,7 +409,7 @@ public class DisplayDataTest {
 
   @Test
   public void testNullNamespaceOverride() {
-    thrown.expect(NullPointerException.class);
+    thrown.expectCause(isA(NullPointerException.class));
 
     DisplayData.from(new HasDisplayData() {
       @Override
@@ -507,7 +512,7 @@ public class DisplayDataTest {
 
   @Test
   public void testDuplicateKeyThrowsException() {
-    thrown.expect(IllegalArgumentException.class);
+    thrown.expectCause(isA(IllegalArgumentException.class));
     DisplayData.from(
         new HasDisplayData() {
           @Override
@@ -743,7 +748,7 @@ public class DisplayDataTest {
       }
     };
 
-    thrown.expect(ClassCastException.class);
+    thrown.expectCause(isA(ClassCastException.class));
     DisplayData.from(component);
   }
 
@@ -829,7 +834,7 @@ public class DisplayDataTest {
 
   @Test
   public void testIncludeNull() {
-    thrown.expect(NullPointerException.class);
+    thrown.expectCause(isA(NullPointerException.class));
     DisplayData.from(
         new HasDisplayData() {
           @Override
@@ -847,7 +852,7 @@ public class DisplayDataTest {
       }
     };
 
-    thrown.expect(NullPointerException.class);
+    thrown.expectCause(isA(NullPointerException.class));
     DisplayData.from(new HasDisplayData() {
         @Override
         public void populateDisplayData(Builder builder) {
@@ -858,7 +863,7 @@ public class DisplayDataTest {
 
   @Test
   public void testNullKey() {
-    thrown.expect(NullPointerException.class);
+    thrown.expectCause(isA(NullPointerException.class));
     DisplayData.from(
         new HasDisplayData() {
           @Override
@@ -956,6 +961,100 @@ public class DisplayDataTest {
     assertThat(json, hasExpectedJson(
         component, "JAVA_CLASS", "class", quoted(DisplayDataTest.class.getName()),
         quoted("DisplayDataTest"), "baz", "http://abc"));
+  }
+
+  /**
+   * Verify that {@link DisplayData.Builder} can recover from exceptions thrown in user code.
+   * This is not used within the Beam SDK since we want all code to produce valid DisplayData.
+   * This test just ensures it is possible to write custom code that does recover.
+   */
+  @Test
+  public void testCanRecoverFromBuildException() {
+    final HasDisplayData safeComponent = new HasDisplayData() {
+      @Override
+      public void populateDisplayData(Builder builder) {
+        builder.add(DisplayData.item("a", "a"));
+      }
+    };
+
+    final HasDisplayData failingComponent = new HasDisplayData() {
+      @Override
+      public void populateDisplayData(Builder builder) {
+        throw new RuntimeException("oh noes!");
+      }
+    };
+
+    DisplayData displayData = DisplayData.from(new HasDisplayData() {
+      @Override
+      public void populateDisplayData(Builder builder) {
+        builder
+            .add(DisplayData.item("b", "b"))
+            .add(DisplayData.item("c", "c"));
+
+        try {
+          builder.include(failingComponent);
+          fail("Expected exception not thrown");
+        } catch (RuntimeException e) {
+          // Expected
+        }
+
+        builder
+            .include(safeComponent)
+            .add(DisplayData.item("d", "d"));
+      }
+    });
+
+    assertThat(displayData, hasDisplayItem("a"));
+    assertThat(displayData, hasDisplayItem("b"));
+    assertThat(displayData, hasDisplayItem("c"));
+    assertThat(displayData, hasDisplayItem("d"));
+  }
+
+  @Test
+  public void testExceptionMessage() {
+    final RuntimeException cause = new RuntimeException("oh noes!");
+    HasDisplayData component = new HasDisplayData() {
+      @Override
+      public void populateDisplayData(Builder builder) {
+        throw cause;
+      }
+    };
+
+    thrown.expectMessage(component.getClass().getName());
+    thrown.expectCause(is(cause));
+
+    DisplayData.from(component);
+  }
+
+  @Test
+  public void testExceptionsNotWrappedRecursively() {
+    final RuntimeException cause = new RuntimeException("oh noes!");
+    HasDisplayData component = new HasDisplayData() {
+      @Override
+      public void populateDisplayData(Builder builder) {
+        builder.include(new HasDisplayData() {
+          @Override
+          public void populateDisplayData(Builder builder) {
+            throw cause;
+          }
+        });
+      }
+    };
+
+    thrown.expectCause(is(cause));
+    DisplayData.from(component);
+  }
+
+  private static class IdentityTransform<T> extends PTransform<PCollection<T>, PCollection<T>> {
+    @Override
+    public PCollection<T> apply(PCollection<T> input) {
+      return input.apply(ParDo.of(new DoFn<T, T>() {
+        @Override
+        public void processElement(ProcessContext c) throws Exception {
+          c.output(c.element());
+        }
+      }));
+    }
   }
 
   private String quoted(Object obj) {

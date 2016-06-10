@@ -30,6 +30,7 @@ import org.apache.beam.sdk.util.IOChannelUtils;
 import org.apache.beam.sdk.util.MimeTypes;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Ordering;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,7 +44,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -129,7 +130,8 @@ public abstract class FileBasedSink<T> extends Sink<T> {
 
     String fileNamePattern = String.format("%s%s%s",
         baseOutputFilename, fileNamingTemplate, getFileExtension(extension));
-    builder.add(DisplayData.item("fileNamePattern", fileNamePattern));
+    builder.add(DisplayData.item("fileNamePattern", fileNamePattern)
+      .withLabel("File Name Pattern"));
   }
 
   /**
@@ -332,12 +334,9 @@ public abstract class FileBasedSink<T> extends Sink<T> {
     protected final List<String> copyToOutputFiles(List<String> filenames, PipelineOptions options)
         throws IOException {
       int numFiles = filenames.size();
-      List<String> srcFilenames = new ArrayList<>();
+      // Sort files for idempotence.
+      List<String> srcFilenames = Ordering.natural().sortedCopy(filenames);
       List<String> destFilenames = generateDestinationFilenames(numFiles);
-
-      // Sort files for copying.
-      srcFilenames.addAll(filenames);
-      Collections.sort(srcFilenames);
 
       if (numFiles > 0) {
         LOG.debug("Copying {} files.", numFiles);
@@ -365,6 +364,12 @@ public abstract class FileBasedSink<T> extends Sink<T> {
         destFilenames.add(IOChannelUtils.constructName(
             baseOutputFilename, fileNamingTemplate, suffix, i, numFiles));
       }
+
+      int numDistinctShards = new HashSet<String>(destFilenames).size();
+      Preconditions.checkState(numDistinctShards == numFiles,
+          "Shard name template '%s' only generated %s distinct file names for %s files.",
+          fileNamingTemplate, numDistinctShards, numFiles);
+
       return destFilenames;
     }
 
@@ -625,8 +630,9 @@ public abstract class FileBasedSink<T> extends Sink<T> {
     public void copy(List<String> srcFilenames, List<String> destFilenames) throws IOException {
       Preconditions.checkArgument(
           srcFilenames.size() == destFilenames.size(),
-          String.format("Number of source files {} must equal number of destination files {}",
-              srcFilenames.size(), destFilenames.size()));
+          "Number of source files %s must equal number of destination files %s",
+          srcFilenames.size(),
+          destFilenames.size());
       int numFiles = srcFilenames.size();
       for (int i = 0; i < numFiles; i++) {
         String src = srcFilenames.get(i);

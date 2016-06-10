@@ -21,6 +21,7 @@ import static org.apache.beam.sdk.util.Structs.addObject;
 import static org.apache.beam.sdk.util.Structs.getDictionary;
 import static org.apache.beam.sdk.util.Structs.getString;
 
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
@@ -76,7 +77,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
-import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
@@ -102,7 +102,6 @@ import java.util.Map;
  */
 @RunWith(JUnit4.class)
 public class DataflowPipelineTranslatorTest implements Serializable {
-
   @Rule public transient ExpectedException thrown = ExpectedException.none();
 
   // A Custom Mockito matcher for an initial Job that checks that all
@@ -720,7 +719,7 @@ public class DataflowPipelineTranslatorTest implements Serializable {
     pipeline.apply(TextIO.Read.from("gs://bucket/foo**/baz"));
 
     // Check that translation does fail.
-    thrown.expectCause(Matchers.allOf(
+    thrown.expectCause(allOf(
         instanceOf(IllegalArgumentException.class),
         ThrowableMessageMatcher.hasMessage(containsString("Unsupported wildcard usage"))));
     t.translate(
@@ -931,6 +930,7 @@ public class DataflowPipelineTranslatorTest implements Serializable {
             .build(),
         ImmutableMap.<String, Object>builder()
             .put("key", "fn")
+            .put("label", "Transform Function")
             .put("type", "JAVA_CLASS")
             .put("value", fn1.getClass().getName())
             .put("shortValue", fn1.getClass().getSimpleName())
@@ -950,6 +950,7 @@ public class DataflowPipelineTranslatorTest implements Serializable {
     ImmutableSet<ImmutableMap<String, Object>> expectedFn2DisplayData = ImmutableSet.of(
         ImmutableMap.<String, Object>builder()
             .put("key", "fn")
+            .put("label", "Transform Function")
             .put("type", "JAVA_CLASS")
             .put("value", fn2.getClass().getName())
             .put("shortValue", fn2.getClass().getSimpleName())

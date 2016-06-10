@@ -18,7 +18,6 @@
 package org.apache.beam.sdk.transforms;
 
 import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.hasDisplayItem;
-import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.hasKey;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -26,6 +25,7 @@ import static org.junit.Assert.fail;
 
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.TestUtils;
+import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.RunnableOnService;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -84,6 +84,7 @@ public class ApproximateUniqueTest implements Serializable {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testApproximateUniqueWithDuplicates() {
     runApproximateUniqueWithDuplicates(100, 100, 100);
     runApproximateUniqueWithDuplicates(1000, 1000, 100);
@@ -112,6 +113,7 @@ public class ApproximateUniqueTest implements Serializable {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testApproximateUniqueWithSkewedDistributions() {
     runApproximateUniqueWithSkewedDistributions(100, 100, 100);
     runApproximateUniqueWithSkewedDistributions(10000, 10000, 100);
@@ -120,6 +122,7 @@ public class ApproximateUniqueTest implements Serializable {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testApproximateUniqueWithSkewedDistributionsAndLargeSampleSize() {
     runApproximateUniqueWithSkewedDistributions(10000, 2000, 1000);
   }
@@ -149,6 +152,7 @@ public class ApproximateUniqueTest implements Serializable {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testApproximateUniquePerKey() {
     List<KV<Long, Long>> elements = Lists.newArrayList();
     List<Long> keys = ImmutableList.of(20L, 50L, 100L);
@@ -178,6 +182,7 @@ public class ApproximateUniqueTest implements Serializable {
    * {@code 2 / sqrt(sampleSize)}.
    */
   @Test
+  @Category(NeedsRunner.class)
   public void testApproximateUniqueWithDifferentSampleSizes() {
     runApproximateUniquePipeline(16);
     runApproximateUniquePipeline(64);
@@ -305,6 +310,6 @@ public class ApproximateUniqueTest implements Serializable {
     DisplayData maxErrorDisplayData = DisplayData.from(specifiedMaxError);
     assertThat(maxErrorDisplayData, hasDisplayItem("maximumEstimationError", 0.1234));
     assertThat("calculated sampleSize should be included", maxErrorDisplayData,
-        hasDisplayItem(hasKey("sampleSize")));
+        hasDisplayItem("sampleSize"));
   }
 }

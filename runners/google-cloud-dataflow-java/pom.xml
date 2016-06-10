@@ -15,20 +15,18 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>org.apache.beam</groupId>
-    <artifactId>runners-parent</artifactId>
-    <version>0.1.0-incubating-SNAPSHOT</version>
+    <artifactId>beam-runners-parent</artifactId>
+    <version>0.2.0-incubating-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>google-cloud-dataflow-java-runner</artifactId>
+  <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
 
   <name>Apache Beam :: Runners :: Google Cloud Dataflow</name>
 
@@ -284,12 +282,27 @@
   <dependencies>
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>java-sdk-all</artifactId>
+      <artifactId>beam-sdks-java-core</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-core-java</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
     </dependency>
 
     <dependency>
       <groupId>com.google.api-client</groupId>
       <artifactId>google-api-client</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-datastore-protobuf</artifactId>
     </dependency>
 
     <dependency>
@@ -419,7 +432,7 @@
 
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>java-sdk-all</artifactId>
+      <artifactId>beam-sdks-java-core</artifactId>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>

@@ -33,6 +33,7 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import javax.annotation.Nullable;
 
 /**
@@ -54,6 +55,11 @@ public abstract class PubsubClient implements Closeable {
         @Nullable String timestampLabel,
         @Nullable String idLabel,
         PubsubOptions options) throws IOException;
+
+    /**
+     * Return the display name for this factory. Eg "Json", "gRPC".
+     */
+    String getKind();
   }
 
   /**
@@ -117,14 +123,27 @@ public abstract class PubsubClient implements Closeable {
    * Path representing a cloud project id.
    */
   public static class ProjectPath implements Serializable {
-    private final String path;
+    private final String projectId;
 
+    /**
+     * Creates a {@link ProjectPath} from a {@link String} representation, which
+     * must be of the form {@code "projects/" + projectId}.
+     */
     ProjectPath(String path) {
-      this.path = path;
+      String[] splits = path.split("/");
+      checkArgument(
+          splits.length == 2 && splits[0].equals("projects"),
+          "Malformed project path \"%s\": must be of the form \"projects/\" + <project id>",
+          path);
+      this.projectId = splits[1];
     }
 
     public String getPath() {
-      return path;
+      return String.format("projects/%s", projectId);
+    }
+
+    public String getId() {
+      return projectId;
     }
 
     @Override
@@ -138,18 +157,17 @@ public abstract class PubsubClient implements Closeable {
 
       ProjectPath that = (ProjectPath) o;
 
-      return path.equals(that.path);
-
+      return projectId.equals(that.projectId);
     }
 
     @Override
     public int hashCode() {
-      return path.hashCode();
+      return projectId.hashCode();
     }
 
     @Override
     public String toString() {
-      return path;
+      return getPath();
     }
   }
 
@@ -165,20 +183,29 @@ public abstract class PubsubClient implements Closeable {
    * Path representing a Pubsub subscription.
    */
   public static class SubscriptionPath implements Serializable {
-    private final String path;
+    private final String projectId;
+    private final String subscriptionName;
 
     SubscriptionPath(String path) {
-      this.path = path;
+      String[] splits = path.split("/");
+      checkState(
+          splits.length == 4 && splits[0].equals("projects") && splits[2].equals("subscriptions"),
+          "Malformed subscription path %s: "
+          + "must be of the form \"projects/\" + <project id> + \"subscriptions\"", path);
+      this.projectId = splits[1];
+      this.subscriptionName = splits[3];
     }
 
     public String getPath() {
-      return path;
+      return String.format("projects/%s/subscriptions/%s", projectId, subscriptionName);
+    }
+
+    public String getName() {
+      return subscriptionName;
     }
 
     public String getV1Beta1Path() {
-      String[] splits = path.split("/");
-      checkState(splits.length == 4, "Malformed subscription path %s", path);
-      return String.format("/subscriptions/%s/%s", splits[1], splits[3]);
+      return String.format("/subscriptions/%s/%s", projectId, subscriptionName);
     }
 
     @Override
@@ -190,22 +217,23 @@ public abstract class PubsubClient implements Closeable {
         return false;
       }
       SubscriptionPath that = (SubscriptionPath) o;
-      return path.equals(that.path);
+      return this.subscriptionName.equals(that.subscriptionName)
+          && this.projectId.equals(that.projectId);
     }
 
     @Override
     public int hashCode() {
-      return path.hashCode();
+      return Objects.hashCode(projectId, subscriptionName);
     }
 
     @Override
     public String toString() {
-      return path;
+      return getPath();
     }
   }
 
   public static SubscriptionPath subscriptionPathFromPath(String path) {
-      return new SubscriptionPath(path);
+    return new SubscriptionPath(path);
   }
 
   public static SubscriptionPath subscriptionPathFromName(
@@ -226,6 +254,12 @@ public abstract class PubsubClient implements Closeable {
 
     public String getPath() {
       return path;
+    }
+
+    public String getName() {
+      String[] splits = path.split("/");
+      checkState(splits.length == 4, "Malformed topic path %s", path);
+      return splits[3];
     }
 
     public String getV1Beta1Path() {
@@ -281,9 +315,24 @@ public abstract class PubsubClient implements Closeable {
      */
     public final long timestampMsSinceEpoch;
 
-    public OutgoingMessage(byte[] elementBytes, long timestampMsSinceEpoch) {
+    /**
+     * If using an id label, the record id to associate with this record's metadata so the receiver
+     * can reject duplicates. Otherwise {@literal null}.
+     */
+    @Nullable
+    public final String recordId;
+
+    public OutgoingMessage(
+        byte[] elementBytes, long timestampMsSinceEpoch, @Nullable String recordId) {
       this.elementBytes = elementBytes;
       this.timestampMsSinceEpoch = timestampMsSinceEpoch;
+      this.recordId = recordId;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("OutgoingMessage(%db, %dms)",
+                           elementBytes.length, timestampMsSinceEpoch);
     }
 
     @Override
@@ -297,16 +346,14 @@ public abstract class PubsubClient implements Closeable {
 
       OutgoingMessage that = (OutgoingMessage) o;
 
-      if (timestampMsSinceEpoch != that.timestampMsSinceEpoch) {
-        return false;
-      }
-      return Arrays.equals(elementBytes, that.elementBytes);
-
+      return timestampMsSinceEpoch == that.timestampMsSinceEpoch
+             && Arrays.equals(elementBytes, that.elementBytes)
+             && Objects.equal(recordId, that.recordId);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hashCode(Arrays.hashCode(elementBytes), timestampMsSinceEpoch);
+      return Objects.hashCode(Arrays.hashCode(elementBytes), timestampMsSinceEpoch, recordId);
     }
   }
 
@@ -340,14 +387,14 @@ public abstract class PubsubClient implements Closeable {
     /**
      * Id to pass to the runner to distinguish this message from all others.
      */
-    public final byte[] recordId;
+    public final String recordId;
 
     public IncomingMessage(
         byte[] elementBytes,
         long timestampMsSinceEpoch,
         long requestTimeMsSinceEpoch,
         String ackId,
-        byte[] recordId) {
+        String recordId) {
       this.elementBytes = elementBytes;
       this.timestampMsSinceEpoch = timestampMsSinceEpoch;
       this.requestTimeMsSinceEpoch = requestTimeMsSinceEpoch;
@@ -361,6 +408,12 @@ public abstract class PubsubClient implements Closeable {
     }
 
     @Override
+    public String toString() {
+      return String.format("IncomingMessage(%db, %dms)",
+                           elementBytes.length, timestampMsSinceEpoch);
+    }
+
+    @Override
     public boolean equals(Object o) {
       if (this == o) {
         return true;
@@ -371,26 +424,18 @@ public abstract class PubsubClient implements Closeable {
 
       IncomingMessage that = (IncomingMessage) o;
 
-      if (timestampMsSinceEpoch != that.timestampMsSinceEpoch) {
-        return false;
-      }
-      if (requestTimeMsSinceEpoch != that.requestTimeMsSinceEpoch) {
-        return false;
-      }
-      if (!Arrays.equals(elementBytes, that.elementBytes)) {
-        return false;
-      }
-      if (!ackId.equals(that.ackId)) {
-        return false;
-      }
-      return Arrays.equals(recordId, that.recordId);
+      return timestampMsSinceEpoch == that.timestampMsSinceEpoch
+             && requestTimeMsSinceEpoch == that.requestTimeMsSinceEpoch
+             && ackId.equals(that.ackId)
+             && recordId.equals(that.recordId)
+             && Arrays.equals(elementBytes, that.elementBytes);
     }
 
     @Override
     public int hashCode() {
       return Objects.hashCode(Arrays.hashCode(elementBytes), timestampMsSinceEpoch,
                               requestTimeMsSinceEpoch,
-                              ackId, Arrays.hashCode(recordId));
+                              ackId, recordId);
     }
   }
 
@@ -466,6 +511,22 @@ public abstract class PubsubClient implements Closeable {
       TopicPath topic, SubscriptionPath subscription, int ackDeadlineSeconds) throws IOException;
 
   /**
+   * Create a random subscription for {@code topic}. Return the {@link SubscriptionPath}. It
+   * is the responsibility of the caller to later delete the subscription.
+   *
+   * @throws IOException
+   */
+  public SubscriptionPath createRandomSubscription(
+      ProjectPath project, TopicPath topic, int ackDeadlineSeconds) throws IOException {
+    // Create a randomized subscription derived from the topic name.
+    String subscriptionName = topic.getName() + "_beam_" + ThreadLocalRandom.current().nextLong();
+    SubscriptionPath subscription =
+        PubsubClient.subscriptionPathFromName(project.getId(), subscriptionName);
+    createSubscription(topic, subscription, ackDeadlineSeconds);
+    return subscription;
+  }
+
+  /**
    * Delete {@code subscription}.
    *
    * @throws IOException
@@ -486,4 +547,11 @@ public abstract class PubsubClient implements Closeable {
    * @throws IOException
    */
   public abstract int ackDeadlineSeconds(SubscriptionPath subscription) throws IOException;
+
+  /**
+   * Return {@literal true} if {@link #pull} will always return empty list. Actual clients
+   * will return {@literal false}. Test clients may return {@literal true} to signal that all
+   * expected messages have been pulled and the test may complete.
+   */
+  public abstract boolean isEOF();
 }

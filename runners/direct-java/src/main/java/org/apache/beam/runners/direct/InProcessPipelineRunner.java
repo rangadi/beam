@@ -17,8 +17,7 @@
  */
 package org.apache.beam.runners.direct;
 
-import org.apache.beam.runners.direct.GroupByKeyEvaluatorFactory.InProcessGroupByKeyOnly;
-import org.apache.beam.runners.direct.GroupByKeyEvaluatorFactory.InProcessGroupByKeyOverrideFactory;
+import org.apache.beam.runners.direct.InProcessGroupByKey.InProcessGroupByKeyOnly;
 import org.apache.beam.runners.direct.ViewEvaluatorFactory.InProcessViewOverrideFactory;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.Pipeline.PipelineExecutionException;
@@ -60,8 +59,6 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-
-import javax.annotation.Nullable;
 
 /**
  * An In-Memory implementation of the Dataflow Programming Model. Supports Unbounded
@@ -131,11 +128,10 @@ public class InProcessPipelineRunner
     PCollection<T> getPCollection();
 
     /**
-     * Returns the (possibly null) key that was output in the most recent {@link GroupByKey} in the
+     * Returns the key that was output in the most recent {@link GroupByKey} in the
      * execution of this bundle.
      */
-    @Nullable
-    Object getKey();
+    StructuralKey<?> getKey();
 
     /**
      * Returns an {@link Iterable} containing all of the elements that have been added to this
@@ -222,6 +218,8 @@ public class InProcessPipelineRunner
             ImmutableSet.<Class<? extends PTransform>>of(
                 GroupByKey.class, InProcessGroupByKeyOnly.class));
     pipeline.traverseTopologically(keyedPValueVisitor);
+
+    DisplayDataValidator.validatePipeline(pipeline);
 
     InProcessEvaluationContext context =
         InProcessEvaluationContext.create(

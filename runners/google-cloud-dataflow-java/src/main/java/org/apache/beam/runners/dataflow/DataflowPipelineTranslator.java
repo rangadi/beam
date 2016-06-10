@@ -31,8 +31,6 @@ import static org.apache.beam.sdk.util.Structs.getString;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import org.apache.beam.runners.dataflow.DataflowPipelineRunner.GroupByKeyAndSortValuesOnly;
-import org.apache.beam.runners.dataflow.internal.BigQueryIOTranslator;
-import org.apache.beam.runners.dataflow.internal.PubsubIOTranslator;
 import org.apache.beam.runners.dataflow.internal.ReadTranslator;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.util.DoFnInfo;
@@ -41,8 +39,6 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.Pipeline.PipelineVisitor;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
-import org.apache.beam.sdk.io.BigQueryIO;
-import org.apache.beam.sdk.io.PubsubIO;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.runners.TransformTreeNode;
@@ -55,6 +51,7 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.display.HasDisplayData;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.AppliedCombineFn;
@@ -348,7 +345,7 @@ public class DataflowPipelineTranslator {
   /**
    * Translates a Pipeline into the Dataflow representation.
    */
-  class Translator implements PipelineVisitor, TranslationContext {
+  class Translator extends PipelineVisitor.Defaults implements TranslationContext {
     /** The Pipeline to translate. */
     private final Pipeline pipeline;
 
@@ -493,16 +490,13 @@ public class DataflowPipelineTranslator {
       return currentTransform;
     }
 
-    @Override
-    public void enterCompositeTransform(TransformTreeNode node) {
-    }
 
     @Override
     public void leaveCompositeTransform(TransformTreeNode node) {
     }
 
     @Override
-    public void visitTransform(TransformTreeNode node) {
+    public void visitPrimitiveTransform(TransformTreeNode node) {
       PTransform<?, ?> transform = node.getTransform();
       TransformTranslator translator =
           getTransformTranslator(transform.getClass());
@@ -550,7 +544,7 @@ public class DataflowPipelineTranslator {
       currentStep.setKind(type);
       steps.add(currentStep);
       addInput(PropertyNames.USER_NAME, getFullName(transform));
-      addDisplayData(PropertyNames.DISPLAY_DATA, DisplayData.from(transform));
+      addDisplayData(stepName, transform);
     }
 
     @Override
@@ -728,9 +722,10 @@ public class DataflowPipelineTranslator {
       outputInfoList.add(outputInfo);
     }
 
-    private void addDisplayData(String name, DisplayData displayData) {
+    private void addDisplayData(String stepName, HasDisplayData hasDisplayData) {
+      DisplayData displayData = DisplayData.from(hasDisplayData);
       List<Map<String, Object>> list = MAPPER.convertValue(displayData, List.class);
-      addList(getProperties(), name, list);
+      addList(getProperties(), PropertyNames.DISPLAY_DATA, list);
     }
 
     @Override
@@ -997,15 +992,6 @@ public class DataflowPipelineTranslator {
 
     ///////////////////////////////////////////////////////////////////////////
     // IO Translation.
-
-    registerTransformTranslator(
-        BigQueryIO.Read.Bound.class, new BigQueryIOTranslator.ReadTranslator());
-
-    registerTransformTranslator(
-        PubsubIO.Read.Bound.class, new PubsubIOTranslator.ReadTranslator());
-    registerTransformTranslator(
-        DataflowPipelineRunner.StreamingPubsubIOWrite.class,
-        new PubsubIOTranslator.WriteTranslator());
 
     registerTransformTranslator(Read.Bounded.class, new ReadTranslator());
   }

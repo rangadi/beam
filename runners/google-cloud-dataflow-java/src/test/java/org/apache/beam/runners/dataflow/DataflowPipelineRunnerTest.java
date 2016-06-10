@@ -18,7 +18,6 @@
 package org.apache.beam.runners.dataflow;
 
 import static org.apache.beam.sdk.util.WindowedValue.valueInGlobalWindow;
-
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -41,6 +40,7 @@ import static org.mockito.Mockito.when;
 import org.apache.beam.runners.dataflow.DataflowPipelineRunner.BatchViewAsList;
 import org.apache.beam.runners.dataflow.DataflowPipelineRunner.BatchViewAsMap;
 import org.apache.beam.runners.dataflow.DataflowPipelineRunner.BatchViewAsMultimap;
+import org.apache.beam.runners.dataflow.DataflowPipelineRunner.BatchViewAsSingleton;
 import org.apache.beam.runners.dataflow.DataflowPipelineRunner.TransformedMap;
 import org.apache.beam.runners.dataflow.internal.IsmFormat;
 import org.apache.beam.runners.dataflow.internal.IsmFormat.IsmRecord;
@@ -75,7 +75,6 @@ import org.apache.beam.sdk.util.GcsUtil;
 import org.apache.beam.sdk.util.NoopPathValidator;
 import org.apache.beam.sdk.util.ReleaseInfo;
 import org.apache.beam.sdk.util.TestCredential;
-import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
 import org.apache.beam.sdk.util.WindowingStrategy;
@@ -84,7 +83,6 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.PInput;
-import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
@@ -820,26 +818,15 @@ public class DataflowPipelineRunnerTest {
   }
 
   /** Records all the composite transforms visited within the Pipeline. */
-  private static class CompositeTransformRecorder implements PipelineVisitor {
+  private static class CompositeTransformRecorder extends PipelineVisitor.Defaults {
     private List<PTransform<?, ?>> transforms = new ArrayList<>();
 
     @Override
-    public void enterCompositeTransform(TransformTreeNode node) {
+    public CompositeBehavior enterCompositeTransform(TransformTreeNode node) {
       if (node.getTransform() != null) {
         transforms.add(node.getTransform());
       }
-    }
-
-    @Override
-    public void leaveCompositeTransform(TransformTreeNode node) {
-    }
-
-    @Override
-    public void visitTransform(TransformTreeNode node) {
-    }
-
-    @Override
-    public void visitValue(PValue value, TransformTreeNode producer) {
+      return CompositeBehavior.ENTER_TRANSFORM;
     }
 
     public List<PTransform<?, ?>> getCompositeTransforms() {
@@ -961,6 +948,38 @@ public class DataflowPipelineRunnerTest {
   @Test
   public void testTextIOSinkUnsupportedInStreaming() throws Exception {
     testUnsupportedSink(TextIO.Write.to("foo"), "TextIO.Write", true);
+  }
+
+  @Test
+  public void testBatchViewAsSingletonToIsmRecord() throws Exception {
+    DoFnTester<KV<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>,
+               IsmRecord<WindowedValue<String>>> doFnTester =
+               DoFnTester.of(
+                   new BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn
+                   <String, GlobalWindow>(GlobalWindow.Coder.INSTANCE));
+
+    assertThat(
+        doFnTester.processBatch(
+            ImmutableList.of(KV.<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>of(
+                0, ImmutableList.of(KV.of(GlobalWindow.INSTANCE, valueInGlobalWindow("a")))))),
+        contains(IsmRecord.of(ImmutableList.of(GlobalWindow.INSTANCE), valueInGlobalWindow("a"))));
+  }
+
+  @Test
+  public void testBatchViewAsSingletonToIsmRecordWithMultipleValuesThrowsException()
+      throws Exception {
+    DoFnTester<KV<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>,
+    IsmRecord<WindowedValue<String>>> doFnTester =
+    DoFnTester.of(
+        new BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn
+        <String, GlobalWindow>(GlobalWindow.Coder.INSTANCE));
+
+    thrown.expect(IllegalStateException.class);
+    thrown.expectMessage("found for singleton within window");
+    doFnTester.processBatch(ImmutableList.of(
+        KV.<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>of(0,
+            ImmutableList.of(KV.of(GlobalWindow.INSTANCE, valueInGlobalWindow("a")),
+                KV.of(GlobalWindow.INSTANCE, valueInGlobalWindow("b"))))));
   }
 
   @Test
@@ -1165,14 +1184,9 @@ public class DataflowPipelineRunnerTest {
                 KV.of(KV.of(1L, windowA),
                     WindowedValue.of(111L, new Instant(2), windowA, PaneInfo.NO_FIRING)))));
 
-    try {
-      doFnTester.processBatch(inputElements);
-      fail("Expected UserCodeException");
-    } catch (UserCodeException e) {
-      assertTrue(e.getCause() instanceof IllegalStateException);
-      IllegalStateException rootCause = (IllegalStateException) e.getCause();
-      assertThat(rootCause.getMessage(), containsString("Unique keys are expected but found key"));
-    }
+    thrown.expect(IllegalStateException.class);
+    thrown.expectMessage("Unique keys are expected but found key");
+    doFnTester.processBatch(inputElements);
   }
 
   @Test

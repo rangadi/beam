@@ -30,6 +30,7 @@ import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.Write;
+import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
@@ -40,10 +41,10 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.sdk.values.PValue;
 
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -128,9 +129,9 @@ public class TransformTreeTest {
     final EnumSet<TransformsSeen> left =
         EnumSet.noneOf(TransformsSeen.class);
 
-    p.traverseTopologically(new Pipeline.PipelineVisitor() {
+    p.traverseTopologically(new Pipeline.PipelineVisitor.Defaults() {
       @Override
-      public void enterCompositeTransform(TransformTreeNode node) {
+      public CompositeBehavior enterCompositeTransform(TransformTreeNode node) {
         PTransform<?, ?> transform = node.getTransform();
         if (transform instanceof Sample.SampleAny) {
           assertTrue(visited.add(TransformsSeen.SAMPLE_ANY));
@@ -142,6 +143,7 @@ public class TransformTreeTest {
           assertTrue(node.isCompositeNode());
         }
         assertThat(transform, not(instanceOf(Read.Bounded.class)));
+        return CompositeBehavior.ENTER_TRANSFORM;
       }
 
       @Override
@@ -153,7 +155,7 @@ public class TransformTreeTest {
       }
 
       @Override
-      public void visitTransform(TransformTreeNode node) {
+      public void visitPrimitiveTransform(TransformTreeNode node) {
         PTransform<?, ?> transform = node.getTransform();
         // Pick is a composite, should not be visited here.
         assertThat(transform, not(instanceOf(Sample.SampleAny.class)));
@@ -162,10 +164,6 @@ public class TransformTreeTest {
             && node.getEnclosingNode().getTransform() instanceof TextIO.Read.Bound) {
           assertTrue(visited.add(TransformsSeen.READ));
         }
-      }
-
-      @Override
-      public void visitValue(PValue value, TransformTreeNode producer) {
       }
     });
 
@@ -184,6 +182,7 @@ public class TransformTreeTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
   public void testMultiGraphSetup() {
     Pipeline p = TestPipeline.create();
 

@@ -15,20 +15,18 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>org.apache.beam</groupId>
-    <artifactId>flink-runner-parent</artifactId>
-    <version>0.1.0-incubating-SNAPSHOT</version>
+    <artifactId>beam-runners-flink-parent</artifactId>
+    <version>0.2.0-incubating-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>flink-runner-examples_2.10</artifactId>
+  <artifactId>beam-runners-flink_2.10-examples</artifactId>
 
   <name>Apache Beam :: Runners :: Flink :: Examples</name>
 
@@ -71,14 +69,33 @@
 
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>flink-runner_2.10</artifactId>
+      <artifactId>beam-runners-flink_2.10</artifactId>
       <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-connector-kafka-0.8_2.10</artifactId>
+      <version>${flink.version}</version>
     </dependency>
 
   </dependencies>
 
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+      </plugin>
+
       <!-- Checkstyle errors for now
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -87,13 +104,21 @@
       -->
 
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <configuration>
+          <additionalparam>-Xdoclint:missing</additionalparam>
+        </configuration>
+      </plugin>
+
+      <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
         <configuration>
           <executable>java</executable>
           <arguments>
             <argument>-classpath</argument>
-            <classpath/>
+            <classpath />
             <argument>${clazz}</argument>
             <argument>--input=${input}</argument>
             <argument>--output=${output}</argument>

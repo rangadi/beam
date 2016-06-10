@@ -20,13 +20,13 @@ package org.apache.beam.sdk.util;
 
 import static com.google.common.base.Preconditions.checkState;
 
+import org.apache.beam.sdk.options.GcpOptions;
 import org.apache.beam.sdk.options.PubsubOptions;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import com.google.common.hash.Hashing;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.AcknowledgeRequest;
@@ -71,40 +71,54 @@ import javax.annotation.Nullable;
 
 /**
  * A helper class for talking to Pubsub via grpc.
+ *
+ * <p>CAUTION: Currently uses the application default credentials and does not respect any
+ * credentials-related arguments in {@link GcpOptions}.
  */
 public class PubsubGrpcClient extends PubsubClient {
   private static final String PUBSUB_ADDRESS = "pubsub.googleapis.com";
   private static final int PUBSUB_PORT = 443;
+  // Will be needed when credentials are correctly constructed and scoped.
+  @SuppressWarnings("unused")
   private static final List<String> PUBSUB_SCOPES =
       Collections.singletonList("https://www.googleapis.com/auth/pubsub");
   private static final int LIST_BATCH_SIZE = 1000;
 
   private static final int DEFAULT_TIMEOUT_S = 15;
 
-  public static final PubsubClientFactory FACTORY =
-      new PubsubClientFactory() {
-        @Override
-        public PubsubClient newClient(
-            @Nullable String timestampLabel, @Nullable String idLabel, PubsubOptions options)
-            throws IOException {
-          ManagedChannel channel = NettyChannelBuilder
-              .forAddress(PUBSUB_ADDRESS, PUBSUB_PORT)
-              .negotiationType(NegotiationType.TLS)
-              .sslContext(GrpcSslContexts.forClient().ciphers(null).build())
-              .build();
-          // TODO: GcpOptions needs to support building com.google.auth.oauth2.Credentials from the
-          // various command line options. It currently only supports the older
-          // com.google.api.client.auth.oauth2.Credentials.
-          GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
-          return new PubsubGrpcClient(timestampLabel,
-                                      idLabel,
-                                      DEFAULT_TIMEOUT_S,
-                                      channel,
-                                      credentials,
-                                      null /* publisher stub */,
-                                      null /* subscriber stub */);
-        }
-      };
+  private static class PubsubGrpcClientFactory implements PubsubClientFactory {
+    @Override
+    public PubsubClient newClient(
+        @Nullable String timestampLabel, @Nullable String idLabel, PubsubOptions options)
+        throws IOException {
+      ManagedChannel channel = NettyChannelBuilder
+          .forAddress(PUBSUB_ADDRESS, PUBSUB_PORT)
+          .negotiationType(NegotiationType.TLS)
+          .sslContext(GrpcSslContexts.forClient().ciphers(null).build())
+          .build();
+      // TODO: GcpOptions needs to support building com.google.auth.oauth2.Credentials from the
+      // various command line options. It currently only supports the older
+      // com.google.api.client.auth.oauth2.Credentials.
+      GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
+      return new PubsubGrpcClient(timestampLabel,
+                                  idLabel,
+                                  DEFAULT_TIMEOUT_S,
+                                  channel,
+                                  credentials,
+                                  null /* publisher stub */,
+                                  null /* subscriber stub */);
+    }
+
+    @Override
+    public String getKind() {
+      return "Grpc";
+    }
+  }
+
+  /**
+   * Factory for creating Pubsub clients using gRCP transport.
+   */
+  public static final PubsubClientFactory FACTORY = new PubsubGrpcClientFactory();
 
   /**
    * Timeout for grpc calls (in s).
@@ -242,10 +256,8 @@ public class PubsubGrpcClient extends PubsubClient {
                .put(timestampLabel, String.valueOf(outgoingMessage.timestampMsSinceEpoch));
       }
 
-      if (idLabel != null) {
-        message.getMutableAttributes()
-               .put(idLabel,
-                    Hashing.murmur3_128().hashBytes(outgoingMessage.elementBytes).toString());
+      if (idLabel != null && !Strings.isNullOrEmpty(outgoingMessage.recordId)) {
+        message.getMutableAttributes().put(idLabel, outgoingMessage.recordId);
       }
 
       request.addMessages(message);
@@ -293,15 +305,13 @@ public class PubsubGrpcClient extends PubsubClient {
       checkState(!Strings.isNullOrEmpty(ackId));
 
       // Record id, if any.
-      @Nullable byte[] recordId = null;
+      @Nullable String recordId = null;
       if (idLabel != null && attributes != null) {
-        String recordIdString = attributes.get(idLabel);
-        if (recordIdString != null && !recordIdString.isEmpty()) {
-          recordId = recordIdString.getBytes();
-        }
+        recordId = attributes.get(idLabel);
       }
-      if (recordId == null) {
-        recordId = pubsubMessage.getMessageId().getBytes();
+      if (Strings.isNullOrEmpty(recordId)) {
+        // Fall back to the Pubsub provided message id.
+        recordId = pubsubMessage.getMessageId();
       }
 
       incomingMessages.add(new IncomingMessage(elementBytes, timestampMsSinceEpoch,
@@ -429,5 +439,10 @@ public class PubsubGrpcClient extends PubsubClient {
                               .build();
     Subscription response = subscriberStub().getSubscription(request);
     return response.getAckDeadlineSeconds();
+  }
+
+  @Override
+  public boolean isEOF() {
+    return false;
   }
 }

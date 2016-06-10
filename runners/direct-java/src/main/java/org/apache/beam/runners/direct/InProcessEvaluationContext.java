@@ -19,9 +19,9 @@ package org.apache.beam.runners.direct;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
-import org.apache.beam.runners.direct.GroupByKeyEvaluatorFactory.InProcessGroupByKeyOnly;
 import org.apache.beam.runners.direct.InMemoryWatermarkManager.FiredTimers;
 import org.apache.beam.runners.direct.InMemoryWatermarkManager.TransformWatermarks;
+import org.apache.beam.runners.direct.InProcessGroupByKey.InProcessGroupByKeyOnly;
 import org.apache.beam.runners.direct.InProcessPipelineRunner.CommittedBundle;
 import org.apache.beam.runners.direct.InProcessPipelineRunner.PCollectionViewWriter;
 import org.apache.beam.runners.direct.InProcessPipelineRunner.UncommittedBundle;
@@ -43,8 +43,10 @@ import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PValue;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.MoreExecutors;
 
 import java.util.Collection;
 import java.util.List;
@@ -128,7 +130,8 @@ class InProcessEvaluationContext {
     this.applicationStateInternals = new ConcurrentHashMap<>();
     this.mergedCounters = new CounterSet();
 
-    this.callbackExecutor = WatermarkCallbackExecutor.create();
+    this.callbackExecutor =
+        WatermarkCallbackExecutor.create(MoreExecutors.directExecutor());
   }
 
   /**
@@ -146,20 +149,23 @@ class InProcessEvaluationContext {
    * @param result the result of evaluating the input bundle
    * @return the committed bundles contained within the handled {@code result}
    */
-  public synchronized CommittedResult handleResult(
+  public CommittedResult handleResult(
       @Nullable CommittedBundle<?> completedBundle,
       Iterable<TimerData> completedTimers,
       InProcessTransformResult result) {
     Iterable<? extends CommittedBundle<?>> committedBundles =
         commitBundles(result.getOutputBundles());
     // Update watermarks and timers
-    CommittedResult committedResult = CommittedResult.create(result, committedBundles);
+    CommittedResult committedResult = CommittedResult.create(result,
+        completedBundle == null
+            ? null
+            : completedBundle.withElements((Iterable) result.getUnprocessedElements()),
+        committedBundles);
     watermarkManager.updateWatermarks(
         completedBundle,
         result.getTimerUpdate().withCompletedTimers(completedTimers),
         committedResult,
         result.getWatermarkHold());
-    fireAllAvailableCallbacks();
     // Update counters
     if (result.getCounters() != null) {
       mergedCounters.merge(result.getCounters());
@@ -228,8 +234,8 @@ class InProcessEvaluationContext {
    * Create a {@link UncommittedBundle} with the specified keys at the specified step. For use by
    * {@link InProcessGroupByKeyOnly} {@link PTransform PTransforms}.
    */
-  public <T> UncommittedBundle<T> createKeyedBundle(
-      CommittedBundle<?> input, Object key, PCollection<T> output) {
+  public <K, T> UncommittedBundle<T> createKeyedBundle(
+      CommittedBundle<?> input, StructuralKey<K> key, PCollection<T> output) {
     return bundleFactory.createKeyedBundle(input, key, output);
   }
 
@@ -297,7 +303,7 @@ class InProcessEvaluationContext {
    * Get an {@link ExecutionContext} for the provided {@link AppliedPTransform} and key.
    */
   public InProcessExecutionContext getExecutionContext(
-      AppliedPTransform<?, ?, ?> application, Object key) {
+      AppliedPTransform<?, ?, ?> application, StructuralKey<?> key) {
     StepAndKey stepAndKey = StepAndKey.of(application, key);
     return new InProcessExecutionContext(
         options.getClock(),
@@ -355,14 +361,21 @@ class InProcessEvaluationContext {
     return mergedCounters;
   }
 
+  @VisibleForTesting
+  void forceRefresh() {
+    watermarkManager.refreshAll();
+    fireAllAvailableCallbacks();
+  }
+
   /**
    * Extracts all timers that have been fired and have not already been extracted.
    *
    * <p>This is a destructive operation. Timers will only appear in the result of this method once
    * for each time they are set.
    */
-  public Map<AppliedPTransform<?, ?, ?>, Map<Object, FiredTimers>> extractFiredTimers() {
-    Map<AppliedPTransform<?, ?, ?>, Map<Object, FiredTimers>> fired =
+  public Map<AppliedPTransform<?, ?, ?>, Map<StructuralKey<?>, FiredTimers>> extractFiredTimers() {
+    forceRefresh();
+    Map<AppliedPTransform<?, ?, ?>, Map<StructuralKey<?>, FiredTimers>> fired =
         watermarkManager.extractFiredTimers();
     return fired;
   }

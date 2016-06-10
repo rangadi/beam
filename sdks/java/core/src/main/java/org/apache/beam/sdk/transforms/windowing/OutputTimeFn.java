@@ -52,15 +52,11 @@ import java.util.Objects;
 @Experimental(Experimental.Kind.OUTPUT_TIME)
 public abstract class OutputTimeFn<W extends BoundedWindow> implements Serializable {
 
-  /**
-   * Private constructor to prevent subclassing other than provided base classes.
-   */
-  private OutputTimeFn() { }
+  protected OutputTimeFn() { }
 
   /**
    * Returns the output timestamp to use for data depending on the given
    * {@code inputTimestamp} in the specified {@code window}.
-   *
    *
    * <p>The result of this method must be between {@code inputTimestamp} and
    * {@code window.maxTimestamp()} (inclusive on both sides).
@@ -180,11 +176,11 @@ public abstract class OutputTimeFn<W extends BoundedWindow> implements Serializa
     /**
      * {@inheritDoc}
      *
-     * @return {@code false}. An {@link OutputTimeFn} that depends only on the window should extend
-     * {@link OutputTimeFn.DependsOnlyOnWindow}.
+     * @return {@code false} by default. An {@link OutputTimeFn} that is known to depend only on the
+     * window should extend {@link OutputTimeFn.DependsOnlyOnWindow}.
      */
     @Override
-    public final boolean dependsOnlyOnWindow() {
+    public boolean dependsOnlyOnWindow() {
       return false;
     }
 

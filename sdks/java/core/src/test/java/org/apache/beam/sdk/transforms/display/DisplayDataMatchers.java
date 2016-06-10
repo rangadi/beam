@@ -57,6 +57,14 @@ public class DisplayDataMatchers {
   }
 
   /**
+   * Creates a matcher that matches if the examined {@link DisplayData} contains an item with the
+   * specified key.
+   */
+  public static Matcher<DisplayData> hasDisplayItem(String key) {
+    return hasDisplayItem(hasKey(key));
+  }
+
+  /**
    * Create a matcher that matches if the examined {@link DisplayData} contains an item with the
    * specified key and String value.
    */
@@ -177,8 +185,8 @@ public class DisplayDataMatchers {
       protected boolean matchesSafely(DisplayData displayData) {
         DisplayData subComponentData = subComponentData();
         if (subComponentData.items().size() == 0) {
-          throw new UnsupportedOperationException("subComponent contains no display data; " +
-              "cannot verify whether it is included");
+          throw new UnsupportedOperationException("subComponent contains no display data; "
+              + "cannot verify whether it is included");
         }
 
         DisplayDataComparison comparison = checkSubset(displayData, subComponentData);

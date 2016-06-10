@@ -37,6 +37,9 @@ import org.junit.Test;
 import java.util.Arrays;
 import java.util.List;
 
+/**
+ * Combine globally test.
+ */
 public class CombineGloballyTest {
 
   private static final String[] WORDS_ARRAY = {
@@ -49,14 +52,18 @@ public class CombineGloballyTest {
     SparkPipelineOptions options = PipelineOptionsFactory.as(SparkPipelineOptions.class);
     options.setRunner(SparkPipelineRunner.class);
     Pipeline p = Pipeline.create(options);
-    PCollection<String> inputWords = p.apply(Create.of(WORDS)).setCoder(StringUtf8Coder.of());
+    PCollection<String> inputWords = p.apply(Create.of(WORDS).withCoder(StringUtf8Coder.of()));
     PCollection<String> output = inputWords.apply(Combine.globally(new WordMerger()));
 
     EvaluationResult res = SparkPipelineRunner.create().run(p);
-    assertEquals("hi there,hi,hi sue bob,hi sue,,bob hi", Iterables.getOnlyElement(res.get(output)));
+    assertEquals("hi there,hi,hi sue bob,hi sue,,bob hi",
+        Iterables.getOnlyElement(res.get(output)));
     res.close();
   }
 
+  /**
+   * Word merger combine function used in the test.
+   */
   public static class WordMerger extends Combine.CombineFn<String, StringBuilder, String> {
 
     @Override
@@ -83,7 +90,7 @@ public class CombineGloballyTest {
 
     @Override
     public String extractOutput(StringBuilder accumulator) {
-      return accumulator != null ? accumulator.toString(): "";
+      return accumulator != null ? accumulator.toString() : "";
     }
 
     private static StringBuilder combine(StringBuilder accum, String datum) {
