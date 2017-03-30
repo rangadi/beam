@@ -1361,7 +1361,7 @@ public class KafkaIO {
 
     ///////////////////////////////////////////////////////////////////////////////////
 
-    private final Write<K, V> spec;
+    private final Write<K, V> spec; // XXX XXX 
     private final Map<String, Object> producerConfig;
 
     private transient Producer<K, V> producer = null;
