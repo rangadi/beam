@@ -1559,6 +1559,12 @@ public class KafkaIO {
     }
   }
 
+  private static class EOSWrite<K, V> extends PTransform<PCollection<KV<K, V>>, PDone> {
+
+    private final Write<K, V> spec;
+    private 
+
+  }
   private static class NullOnlyCoder<T> extends AtomicCoder<T> {
     @Override
     public void encode(T value, OutputStream outStream) {
