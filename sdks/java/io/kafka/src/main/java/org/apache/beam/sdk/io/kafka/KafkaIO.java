@@ -75,6 +75,14 @@ import org.apache.beam.sdk.metrics.SinkMetrics;
 import org.apache.beam.sdk.metrics.SourceMetrics;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.state.BagState;
+import org.apache.beam.sdk.state.CombiningState;
+import org.apache.beam.sdk.state.StateSpec;
+import org.apache.beam.sdk.state.StateSpecs;
+import org.apache.beam.sdk.state.TimeDomain;
+import org.apache.beam.sdk.state.TimerSpec;
+import org.apache.beam.sdk.state.TimerSpecs;
+import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -1561,10 +1569,72 @@ public class KafkaIO {
 
   private static class EOSWrite<K, V> extends PTransform<PCollection<KV<K, V>>, PDone> {
 
+    // private final Write<K, V> spec;
+
+
+
+    @Override
+    public PDone expand(PCollection<KV<K, V>> input) {
+      return null;
+    }
+  }
+
+
+  private static class KafkaEOSWriter<K, V> extends DoFn<KV<K, V>, KV<Integer, KV<Long, Long>>> {
+
+    private static final String POLL_TIMER = "pollTimer";
+    private static final String SEQUENCE_ID = "sequenceId";
+    private static final String OPEN_BUFFER = "openBuffer";
+    private static final String CLOSED_BUFFER = "closedBuffer";
+
+    @TimerId(POLL_TIMER)
+    private final TimerSpec timer = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
+
+    @StateId(SEQUENCE_ID)
+    private final StateSpec<ValueState<Long>> sequenceIdSpec = StateSpecs.value();
+
+    @StateId(OPEN_BUFFER)
+    private final StateSpec<ValueState<Integer>> openBufferSpec = StateSpecs.value();
+
+    @StateId(CLOSED_BUFFER)
+    private final StateSpec<ValueState<Integer>> closedBufferSpec = StateSpecs.value();
+
     private final Write<K, V> spec;
-    private 
+
+    private transient Producer<K, V> producer;
+
+    KafkaEOSWriter(Write<K, V> spec) {
+      this.spec = spec;
+    }
+
+
+    private initialize(int idx) {
+      String producerId = "df_eos_sink_" + idx; // XXX get a prefix from
+
+      producer = initialize
+    }
 
   }
+
+  private static <K, V> Producer<K, V> initializeEosProducer(Write<K, V> spec, String producerId) {
+
+    Map<String, Object> producerConfig = new HashMap<>(spec.getProducerConfig());
+    producerConfig.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+                       spec.getKeySerializer());
+    producerConfig.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                       spec.getValueSerializer());
+
+    producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+    producerConfig.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, producerId);
+
+    Producer<K, V> producer = spec.getProducerFactoryFn() != null ?
+        spec.getProducerFactoryFn().apply((producerConfig))
+        : new KafkaProducer<K, V>(producerConfig);
+
+    producer.initTransactions();
+    return producer;
+  }
+
   private static class NullOnlyCoder<T> extends AtomicCoder<T> {
     @Override
     public void encode(T value, OutputStream outStream) {
