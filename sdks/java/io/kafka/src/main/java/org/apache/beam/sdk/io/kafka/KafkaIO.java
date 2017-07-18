@@ -1582,22 +1582,10 @@ public class KafkaIO {
 
   private static class KafkaEOSWriter<K, V> extends DoFn<KV<K, V>, KV<Integer, KV<Long, Long>>> {
 
-    private static final String POLL_TIMER = "pollTimer";
     private static final String SEQUENCE_ID = "sequenceId";
-    private static final String OPEN_BUFFER = "openBuffer";
-    private static final String CLOSED_BUFFER = "closedBuffer";
-
-    @TimerId(POLL_TIMER)
-    private final TimerSpec timer = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
 
     @StateId(SEQUENCE_ID)
     private final StateSpec<ValueState<Long>> sequenceIdSpec = StateSpecs.value();
-
-    @StateId(OPEN_BUFFER)
-    private final StateSpec<ValueState<Integer>> openBufferSpec = StateSpecs.value();
-
-    @StateId(CLOSED_BUFFER)
-    private final StateSpec<ValueState<Integer>> closedBufferSpec = StateSpecs.value();
 
     private final Write<K, V> spec;
 
@@ -1608,10 +1596,22 @@ public class KafkaIO {
     }
 
 
-    private initialize(int idx) {
-      String producerId = "df_eos_sink_" + idx; // XXX get a prefix from
+    private void initialize(int idx, long sequenceId) {
+      String producerId = "df_eos_sink_" + idx; // TODO: base this on consumer id.
 
-      producer = initialize
+      producer = initializeEosProducer(spec, producerId);
+
+      // Fetch metadata for partition 'idx' partition
+
+      Consumer<byte[], byte[]> consumer = new KafkaConsumer<>(ImmutableMap.<String, Object>of(
+          ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+          spec.getProducerConfig().get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)
+          //TODO: anything else?
+      ));
+
+      try {
+        
+      }
     }
 
   }
