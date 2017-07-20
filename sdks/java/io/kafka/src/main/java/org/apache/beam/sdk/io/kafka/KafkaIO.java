@@ -27,7 +27,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.MoreObjects;
-import com.google.common.collect.Collections2;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -35,7 +34,6 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -64,6 +62,7 @@ import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.AvroCoder;
+import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
@@ -85,12 +84,17 @@ import org.apache.beam.sdk.state.StateSpec;
 import org.apache.beam.sdk.state.StateSpecs;
 import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
@@ -107,6 +111,7 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.AuthorizationException;
@@ -295,6 +300,9 @@ public class KafkaIO {
   public static <K, V> Write<K, V> write() {
     return new AutoValue_KafkaIO_Write.Builder<K, V>()
         .setProducerConfig(Write.DEFAULT_PRODUCER_PROPERTIES)
+        .setEOS(false)
+        .setNumShards(0)
+        .setConsumerFactoryFn(Read.KAFKA_CONSUMER_FACTORY_FN)
         .build();
   }
 
@@ -1428,6 +1436,11 @@ public class KafkaIO {
     // Configuration for EOS sink
     abstract boolean isEOS();
     @Nullable abstract String getSinkGroupId();
+    abstract int getNumShards();
+    @Nullable abstract Coder<K> getKeyCoder();
+    @Nullable abstract Coder<V> getValueCoder();
+    @Nullable abstract
+    SerializableFunction<Map<String, Object>, ? extends Consumer<?, ?>> getConsumerFactoryFn();
 
     abstract Builder<K, V> toBuilder();
 
@@ -1439,8 +1452,13 @@ public class KafkaIO {
           SerializableFunction<Map<String, Object>, Producer<K, V>> fn);
       abstract Builder<K, V> setKeySerializer(Class<? extends Serializer<K>> serializer);
       abstract Builder<K, V> setValueSerializer(Class<? extends Serializer<V>> serializer);
-      abstract Builder<K, V> setSinkGroupId(String sinkGroupId);
       abstract Builder<K, V> setEOS(boolean eosEnabled);
+      abstract Builder<K, V> setSinkGroupId(String sinkGroupId);
+      abstract Builder<K, V> setNumShards(int numShards);
+      abstract Builder<K, V> setKeyCoder(Coder<K> keyCoder);
+      abstract Builder<K, V> setValueCoder(Coder<V> valueCoder);
+      abstract Builder<K, V> setConsumerFactoryFn(
+          SerializableFunction<Map<String, Object>, ? extends Consumer<?, ?>> fn);
       abstract Write<K, V> build();
     }
 
@@ -1508,6 +1526,23 @@ public class KafkaIO {
       return toBuilder().setSinkGroupId(sinkGroupId).build();
     }
 
+    public Write<K, V> withNumShards(int numShards) {
+      return toBuilder().setNumShards(numShards).build();
+    }
+
+    public Write<K, V> withKeyCoder(Coder<K> keyCoder) {
+      return toBuilder().setKeyCoder(keyCoder).build();
+    }
+
+    public Write<K, V> withValueCoder(Coder<V> valueCoder) {
+      return toBuilder().setValueCoder(valueCoder).build();
+    }
+
+    public Write<K, V> withConsumerFactoryFn(
+        SerializableFunction<Map<String, Object>, ? extends Consumer<?, ?>> consumerFactoryFn) {
+      return toBuilder().setConsumerFactoryFn(consumerFactoryFn).build();
+    }
+
     /**
      * Writes just the values to Kafka. This is useful for writing collections of values rather
      * thank {@link KV}s.
@@ -1518,7 +1553,11 @@ public class KafkaIO {
 
     @Override
     public PDone expand(PCollection<KV<K, V>> input) {
-      input.apply(ParDo.of(new KafkaWriter<>(this)));
+      if (isEOS()) {
+        input.apply(new EOSWrite<>(this));
+      } else {
+        input.apply(ParDo.of(new KafkaWriter<>(this)));
+      }
       return PDone.in(input.getPipeline());
     }
 
@@ -1527,6 +1566,13 @@ public class KafkaIO {
       checkNotNull(getProducerConfig().get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
           "Kafka bootstrap servers should be set");
       checkNotNull(getTopic(), "Kafka topic should be set");
+      if (isEOS()) {
+        checkNotNull(getSinkGroupId(), "A group id is required for exactly-once sink");
+        // TODO: How do we avoid multiple jobs starting with same group id?
+        checkNotNull(getKeyCoder(), "Key coder is required for exact-once sink");
+        checkNotNull(getValueCoder(), "Value coder is required for exactly-once sink");
+        checkNotNull(getNumShards() > 0); // TODO: set it to num of partitions.
+      }
     }
 
     // set config defaults
@@ -1590,23 +1636,62 @@ public class KafkaIO {
     }
   }
 
-  private static class EOSWrite<K, V> extends PTransform<PCollection<KV<K, V>>, PDone> {
+  private static class EOSWrite<K, V> extends PTransform<PCollection<KV<K, V>>, PCollection<Void>> {
 
-    // private final Write<K, V> spec;
+    private final Write<K, V> spec;
 
-
+    EOSWrite(Write<K, V> spec) {
+      this.spec = spec;
+    }
 
     @Override
-    public PDone expand(PCollection<KV<K, V>> input) {
-      return null;
+    public PCollection<Void> expand(PCollection<KV<K, V>> input) {
+      //
+      // Exactly once sink involves two shuffles of the records:
+      //            A -- GBK --> B -- GBK --> C
+      // A : Assigns a random shard for message. Note that there are no ordering guarantees for
+      //     user records. User can still control partitioning among topic partitions as with
+      //     regular sink (of course, there are no ordering guarantees in regular sink either).
+      // B : Assigns a sequential id for each messages within a shard.
+      // C : Writes each shard to Kafka in sequential id order. In Dataflow when C sees a record
+      //     and id, it implies that record and the associated id are checkpointed to persistent
+      //     storage and this record will always have same id, even in retries.
+      //     Exactly-once semantics are provided by writing records in the strict order of
+      //     these checkpointed sequence ids.
+      //
+      // Parallelism for B and C is fixed to 'numShards', which should be less than or equals to
+      // number of partitions for the topic. A reasons for that:
+      //  - B & C implement their functionality using per-key state. Shard id makes it independent
+      //    of cardinality of user key.
+      //  - We create one producer per shard and 'transactional id' is based on shard id. This
+      //    requires that number of shards to finite and also helps with batching and avoids
+      //    initializing producers and transactions.
+      //  - Most importantly, each of sharded writers stores 'next message id' in partition
+      //    metadata, which is committed atomically with Kafka transactions. This is critical
+      //    to handle retries of C correctly.
+      //
+
+      return input
+          .apply(Window.<KV<K, V>>into(new GlobalWindows()) // Everything into global window.
+                     .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
+                     .discardingFiredPanes())
+          .apply("Shuffle into shards", ParDo.of(new EOSReshard<K, V>(0, spec.getNumShards())))
+          .apply("Shard", GroupByKey.<Integer, KV<K, V>>create())
+          .apply("Assign sequential ids", ParDo.of(new EOSSequencer<K, V>()))
+          .apply("Persist Ids", GroupByKey.<Integer, KV<Long, KV<K, V>>>create())
+          .apply(String.format("Write to Kafka topic '%s'", spec.getTopic()),
+                 ParDo.of(new KafkaEOWriter<>(spec)));
     }
   }
 
+  /**
+   * Shuffle messages assigning each randomly to a shard.
+   */
   private static class EOSReshard<K, V> extends DoFn<KV<K, V>, KV<Integer, KV<K, V>>> {
     private final Random random;
     private final int numShards;
 
-    EOSReshard(int seed, int numShards) {
+    EOSReshard(long seed, int numShards) {
       this.random = new Random(seed);
       this.numShards = numShards;
     }
@@ -1617,14 +1702,29 @@ public class KafkaIO {
     }
   }
 
-  private static class EOSSequencer<K, V> extends DoFn<KV<Integer, Iterable<KV<K, V>>>, KV<Long, KV<K, V>>> {
+  private static class EOSSequencer<K, V>
+      extends DoFn<KV<Integer, Iterable<KV<K, V>>>, KV<Integer, KV<Long, KV<K, V>>>> {
+    private static final String NEXT_ID = "nextId";
+    @StateId(NEXT_ID)
+    private final StateSpec<ValueState<Long>> nextIdSpec = StateSpecs.value();
 
-
+    @ProcessElement
+    public void processElement(@StateId(NEXT_ID) ValueState<Long> nextIdState, ProcessContext ctx) {
+      long nextId = MoreObjects.firstNonNull(nextIdState.read(), 0L);
+      int shard = ctx.element().getKey();
+      for (KV<K, V> value : ctx.element().getValue()) {
+        // LOG.info("XXX Assigning id {} to {}", nextId, value.getKey());
+        ctx.output(KV.of(shard, KV.of(nextId, value)));
+        nextId++;
+      }
+      nextIdState.write(nextId);
+    }
   }
 
-  private static class KafkaEOSWriter<K, V> extends DoFn<KV<Integer, KV<Long, List<KV<K, V>>>>, Void> {
+  private static class KafkaEOWriter<K, V>
+      extends DoFn<KV<Integer, Iterable<KV<Long, KV<K, V>>>>, Void> {
 
-    private static final String SEQUENCE_ID = "sequenceId";
+    private static final String NEXT_ID = "nextId";
     private static final String MIN_BUFFERED_ID = "minBufferedId";
     private static final String OUT_OF_ORDER_BUFFER = "outOfOrderBuffer";
 
@@ -1637,158 +1737,204 @@ public class KafkaIO {
 
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
-    @StateId(SEQUENCE_ID)
+    @StateId(NEXT_ID)
     private final StateSpec<ValueState<Long>> sequenceIdSpec = StateSpecs.value();
     @StateId(MIN_BUFFERED_ID)
     private final StateSpec<ValueState<Long>> minBufferedId = StateSpecs.value();
     @StateId(OUT_OF_ORDER_BUFFER)
-    private final StateSpec<BagState<KV<Long, List<KV<K, V>>>>> outOfOrderBuffer = StateSpecs.bag();
+    private final StateSpec<BagState<KV<Long, KV<K, V>>>> outOfOrderBuffer;
 
     private final Write<K, V> spec;
 
     // One cache for each sink (usually there is only one sink per pipeline
     private static final Map<String, Map<Integer, ShardInfo<?, ?>>> CACHE_BY_GROUP_ID
         = new HashMap<>();
+    // TODO: Need a way to close producers that are no longer relevant (may be have a timeout?).
 
-    private static class ShardInfo<K, V> {
-      private final int shard;
-      private final Producer<K, V> producer;
-      private final String producerName;
-      private long committedSeqId;
-
-      ShardInfo(int shard, Producer<K, V> producer, String producerName, long committedSeqId) {
-        this.shard = shard;
-        this.producer = producer;
-        this.producerName = producerName;
-        this.committedSeqId = committedSeqId;
-      }
-    }
+    // This would mainly matter only in batch pipelines. Could be configurable.
+    private static final int MAX_RECORDS_PER_TXN = 1000;
 
 
-    KafkaEOSWriter(Write<K, V> spec) {
+    KafkaEOWriter(Write<K, V> spec) {
       this.spec = spec;
+      this.outOfOrderBuffer = StateSpecs.bag(KvCoder.of(
+          BigEndianLongCoder.of(), KvCoder.of(spec.getKeyCoder(), spec.getValueCoder())));
     }
 
-    public void processElement(@StateId(SEQUENCE_ID) ValueState<Long> seqIdState,
+    @ProcessElement
+    public void processElement(@StateId(NEXT_ID) ValueState<Long> nextIdState,
                                @StateId(MIN_BUFFERED_ID) ValueState<Long> minBufferedIdState,
                                @StateId(OUT_OF_ORDER_BUFFER)
-                                   BagState<KV<Long, List<KV<K, V>>>> oooBufferState,
+                                   BagState<KV<Long, KV<K, V>>> oooBufferState,
                                ProcessContext ctx)
                                throws IOException {
 
       int shard = ctx.element().getKey();
-      long batchId = ctx.element().getValue().getKey();
-
-      List<KV<K, V>> batch = ctx.element().getValue().getValue();
 
       minBufferedIdState.readLater();
-      long nextId = MoreObjects.firstNonNull(seqIdState.read(), 0L);
+      long nextId = MoreObjects.firstNonNull(nextIdState.read(), 0L);
       long minBufferedId = MoreObjects.firstNonNull(minBufferedIdState.read(), Long.MAX_VALUE);
 
       ShardInfo<K, V> shardInfo = getShardInfo(shard, nextId);
-      long committedId = shardInfo.committedSeqId;
+      long committedId = shardInfo.committedId;
+
+      LOG.info("XXX Processing {} records", Iterables.size(ctx.element().getValue()));
 
       if (committedId >= nextId) {
-        // This is retry of an already committed batch.
-        LOG.info("{}: committed id {} is ahead of expected {}. {} batches will be dropped.",
+        // This is a retry of an already committed batch.
+        LOG.info("{}: committed id {} is ahead of expected {}. {} records will be dropped "
+                 + "(these are already written).",
                  shard, committedId, nextId - 1, committedId - nextId + 1);
         // TODO: increment a stat.
         nextId = committedId + 1;
       }
 
-      if (batchId < nextId) {
-        LOG.info("{}: dropping older batch {}. Already committed till {}",
-                 shard, batchId, committedId);
-      } else if (batchId > nextId) {
-        // Out of order delivery. Should be pretty rare.
+      try {
+        shardInfo.openTxn();
+        int txnSize = 0;
 
-        LOG.info("{}: Saving out of order batch {}, next batch to be committed is {}",
-                 shard, batchId, nextId);
+        // Iterate in recordId order. The input iterator could be mostly sorted.
+        // There might be out of order messages buffered in earlier iterations. These
+        // will get merged if and when minBufferedId matches nextId.
 
-        oooBufferState.add(ctx.element().getValue());
-        minBufferedIdState.write(Math.min(minBufferedId, batchId));
+        Iterator<KV<Long, KV<K, V>>> iter = ctx.element().getValue().iterator();
 
-      } else { // batchId == nextId. Finally write the batch.
+        while (iter.hasNext()) {
+          KV<Long, KV<K, V>> kv = iter.next();
+          long recordId = kv.getKey();
 
-        sendOneBatch(nextId, shardInfo, batch);
-        nextId++;
+          if (recordId < nextId) {
+            LOG.info("{}: dropping older record {}. Already committed till {}",
+                     shard, recordId, committedId);
+            continue;
+          }
 
-        if (minBufferedId == nextId) {
-          // One or more of the buffered batches can be committed now.
-          List<KV<Long, List<KV<K, V>>>> buffered = Lists.newArrayList(oooBufferState.read());
-          Collections.sort(buffered, new Comparator<KV<Long, List<KV<K, V>>>>() {
-            @Override
-            public int compare(KV<Long, List<KV<K, V>>> o1, KV<Long, List<KV<K, V>>> o2) {
-              return Long.compare(o1.getKey(), o2.getKey());
-            }
-          });
+          if (recordId > nextId) {
+            // Out of order delivery. Should be pretty rare (what about in a batch pipeline?)
 
-          oooBufferState.clear();
-          minBufferedIdState.clear();
+            LOG.info("{}: Saving out of order record {}, next record id to be written is {}",
+                     shard, recordId, nextId);
 
-          for(KV<Long, List<KV<K, V>>> kv : buffered) {
-            if (kv.getKey() == nextId) {
-              LOG.info("{} Committing buffered batch {}", shard, nextId);
-              sendOneBatch(nextId, shardInfo, kv.getValue());
-              nextId++;
-            } else {
-              // buffer again
-              oooBufferState.add(kv);
-              minBufferedIdState.write(Math.min(minBufferedIdState.read(), kv.getKey() ));
-            }
+            // checkState(recordId - nextId < 10000, "records are way out of order");
+
+            oooBufferState.add(kv);
+            minBufferedId = Math.min(minBufferedId, recordId);
+            minBufferedIdState.write(minBufferedId);
+            continue;
+          }
+
+          // recordId == nextId. Finally write record
+
+          // LOG.info("XXX Writing {} with id {}", kv.getValue().getKey(), nextId);
+          shardInfo.sendRecord(kv.getValue());
+          nextId++;
+
+          if (++txnSize >= MAX_RECORDS_PER_TXN) {
+            shardInfo.closeTxn(recordId);
+            txnSize = 0;
+            shardInfo.openTxn();
+          }
+
+          if (minBufferedId == nextId) {
+            // One or more of the buffered batches can be committed now.
+            // Read all the buffered records in to memory and sort them.
+            // Reading into memory might be problematic in extreme cases. Might need to fix.
+
+            List<KV<Long, KV<K, V>>> buffered = Lists.newArrayList(oooBufferState.read());
+            Collections.sort(buffered, new KV.OrderByKey<Long, KV<K, V>>());
+
+            LOG.info("{} : merging {} buffered records with min buffered id", shard, minBufferedId);
+
+            oooBufferState.clear();
+            minBufferedIdState.clear();
+            minBufferedId = Long.MAX_VALUE;
+
+            iter = Iterators.mergeSorted(ImmutableList.of(iter, buffered.iterator()),
+                                         new KV.OrderByKey<Long, KV<K, V>>());
           }
         }
-      }
-    }
 
-    private void sendOneBatch(long seqId,
-                              ShardInfo shardInfo,
-                              List<KV<K, V>> batch) throws IOException {
-      Producer<K,V> producer = shardInfo.producer;
-
-      try {
-        producer.beginTransaction();
-        for (KV<K,V> kv : batch) {
-          shardInfo.producer.send(
-              new ProducerRecord<>(spec.getTopic(), kv.getKey(), kv.getValue()));
-        }
-
-        // Store seqId in consumer group metadata. This gets atomically with the messages.
-        shardInfo.producer.sendOffsetsToTransaction(
-            ImmutableMap.of(new TopicPartition(spec.getTopic(), shardInfo.shard),
-                            new OffsetAndMetadata(0, JSON_MAPPER.writeValueAsString(
-                                new PartitionMetadata(seqId, shardInfo.producerName)
-                            ))),
-            spec.getSinkGroupId());
-
-        shardInfo.producer.commitTransaction();
+        shardInfo.closeTxn(nextId - 1);
+        nextIdState.write(nextId);
       } catch (ProducerFencedException | OutOfOrderSequenceException | AuthorizationException e) {
         // JavaDoc says these are not recoverable errors and producer should be closed.
 
         // Close the producer and and remove it from the cache. A new producer will be created
-        // in retry. It is possible a rough worker keeps retrying and ends up fencing off
+        // in retry. It is possible that a rough worker keeps retrying and ends up fencing off
         // active producers. How likely this might be or how well such a scenario is handled
-        // depends on the runner. For now we will leave it upper layer.
+        // depends on the runner. For now we will leave it to upper layers, will need to revisit.
 
         LOG.warn("{} : closing producer {} after unrecoverable error. The work might be migrated. "
-                 + "Was trying to commit batch {}.",
-                 shardInfo.shard, shardInfo.producerName, seqId, e);
+                 + "committed id {}, current id {}.",
+                 shardInfo.shard, shardInfo.producerName, shardInfo.committedId, nextId - 1, e);
 
         CACHE_BY_GROUP_ID.get(spec.getSinkGroupId()).remove(shardInfo.shard);
-        producer.close();
+        shardInfo.producer.close();
         throw e;
       }
-      // other exceptions will propagate up.
     }
 
-
-    private class PartitionMetadata {
-      final long sequenceId;
-      final String producerName; // This is just for info
+    private static class PartitionMetadata {
+      public final long sequenceId;
+      public final String producerName; // Just FYI
 
       PartitionMetadata(long sequenceId, String producerName) {
         this.sequenceId = sequenceId;
         this.producerName = producerName;
+      }
+    }
+
+    private static class ShardInfo<K, V> {
+      private final int shard;
+      private final Producer<K, V> producer;
+      private final String producerName;
+      private final Write<K, V> spec;
+      private long committedId;
+
+      ShardInfo(int shard,
+                Producer<K, V> producer,
+                String producerName,
+                Write<K, V> spec,
+                long committedId) {
+        this.shard = shard;
+        this.producer = producer;
+        this.producerName = producerName;
+        this.spec = spec;
+        this.committedId = committedId;
+      }
+
+      void openTxn() {
+        producer.beginTransaction();
+      }
+
+      void sendRecord(KV<K, V> record) {
+        try {
+          producer.send(
+              new ProducerRecord<>(spec.getTopic(), record.getKey(), record.getValue()));
+        } catch (KafkaException e) {
+          producer.abortTransaction();
+          throw e;
+        }
+      }
+
+      void closeTxn(long lastRecordId) throws IOException {
+        try {
+          // Store id in consumer group metadata for the partition
+          producer.sendOffsetsToTransaction(
+              ImmutableMap.of(new TopicPartition(spec.getTopic(), shard),
+                              new OffsetAndMetadata(0, JSON_MAPPER.writeValueAsString(
+                                  new PartitionMetadata(lastRecordId, producerName)
+                              ))),
+              spec.getSinkGroupId());
+          producer.commitTransaction();
+
+          LOG.info("{} : committed {} records", shard, lastRecordId - committedId);
+
+          committedId = lastRecordId;
+        } catch (KafkaException e) {
+          producer.abortTransaction();
+          throw e;
+        }
       }
     }
 
@@ -1821,12 +1967,11 @@ public class KafkaIO {
       // Fetch latest committed metadata for the partition (if any). Checks committed sequence ids.
       try {
 
-        Consumer<byte[], byte[]> consumer = new KafkaConsumer<>(ImmutableMap.of(
+        Consumer<?, ?> consumer = spec.getConsumerFactoryFn().apply((ImmutableMap.of(
             ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, spec
                 .getProducerConfig().get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
             ConsumerConfig.GROUP_ID_CONFIG, spec.getSinkGroupId()
-        ));
-        //TODO: Let user provide function to create own consumer similar to Reader.
+        )));
 
         OffsetAndMetadata committed;
         try {
@@ -1837,13 +1982,15 @@ public class KafkaIO {
 
         long committedSeqId = -1;
 
-        if (committed == null) {
+        if (committed == null || committed.metadata() == null || committed.metadata().isEmpty()) {
           if (nextSeqId != 0) {
             throw new IllegalStateException(String.format(
                 "Stored sequence id %d exists, but there is no committed sequence id. %s.",
                 nextSeqId, producerName));
           }
         } else {
+          // LOG.info("XXX committed {}", committed.toString());
+
           PartitionMetadata metadata = JSON_MAPPER.readValue(committed.metadata(),
                                                              PartitionMetadata.class);
           // TODO: do we need a unique writer id for the job? How do we gracefully handle two
@@ -1858,7 +2005,8 @@ public class KafkaIO {
           }
         }
 
-        ShardInfo<K, V> shardInfo = new ShardInfo(shard, producer, producerName, committedSeqId);
+        ShardInfo<K, V> shardInfo = new ShardInfo<>(shard, producer, producerName,
+                                                    spec, committedSeqId);
 
         synchronized (cache) {
           if (cache.get(shard) != null) {
@@ -1878,8 +2026,6 @@ public class KafkaIO {
       }
     }
   }
-
-
 
   private static <K, V> Producer<K, V> initializeEosProducer(Write<K, V> spec,
                                                              String producerName) {
