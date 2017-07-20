@@ -722,7 +722,7 @@ public class KafkaIOTest {
     // Simply read from kafka source and write to kafka sink. Then verify the records
     // are correctly published to mock kafka producer.
 
-    int numElements = 1000;
+    int numElements = 10; // XXX
 
     synchronized (MOCK_PRODUCER_LOCK) {
 
