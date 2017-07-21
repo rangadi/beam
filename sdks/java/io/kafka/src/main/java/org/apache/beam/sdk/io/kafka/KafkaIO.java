@@ -21,6 +21,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
@@ -1847,7 +1848,8 @@ public class KafkaIO {
                      .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
                      .discardingFiredPanes())
           .apply(String.format("Shuffle across %d shards", spec.getNumShards()),
-                 ParDo.of(new EOSReshard<K, V>(0, spec.getNumShards())))
+                 ParDo.of(new EOSReshard<K, V>(DateTimeUtils.currentTimeMillis(),
+                                               spec.getNumShards())))
           .apply("Persist sharding", GroupByKey.<Integer, KV<K, V>>create())
           .apply("Assign sequential ids", ParDo.of(new EOSSequencer<K, V>()))
           .apply("Persist ids", GroupByKey.<Integer, KV<Long, KV<K, V>>>create())
@@ -1996,9 +1998,8 @@ public class KafkaIO {
             continue;
           }
 
-          // recordId == nextId. Finally write record
+          // recordId and nextId match. Finally write record.
 
-          // LOG.info("XXX Writing {} with id {}", kv.getValue().getKey(), nextId);
           writer.sendRecord(kv.getValue());
           nextId++;
 
@@ -2048,15 +2049,20 @@ public class KafkaIO {
       }
     }
 
-    private static class PartitionMetadata {
-      public final String writerId;
+    private static class ShardMetadata {
+      @JsonProperty("seq")
       public final long sequenceId;
-      public final String producerName; // Just FYI
+      @JsonProperty("id")
+      public final String writerId;
 
-      PartitionMetadata(String writerId, long sequenceId, String producerName) {
-        this.writerId = writerId;
+      private ShardMetadata() { // for json
+        sequenceId = -1;
+        writerId = null;
+      }
+
+      ShardMetadata(long sequenceId, String writerId) {
         this.sequenceId = sequenceId;
-        this.producerName = producerName;
+        this.writerId = writerId;
       }
     }
 
@@ -2101,9 +2107,11 @@ public class KafkaIO {
           // Store id in consumer group metadata for the partition
           producer.sendOffsetsToTransaction(
               ImmutableMap.of(new TopicPartition(spec.getTopic(), shard),
-                              new OffsetAndMetadata(0, JSON_MAPPER.writeValueAsString(
-                                  new PartitionMetadata(writerId, lastRecordId, producerName)
-                              ))),
+                              new OffsetAndMetadata(
+                                Long.MAX_VALUE, // So that consumer group does not expire.
+                                JSON_MAPPER.writeValueAsString(new ShardMetadata(lastRecordId,
+                                                                                 writerId)
+                                ))),
               spec.getSinkGroupId());
           producer.commitTransaction();
 
@@ -2153,7 +2161,9 @@ public class KafkaIO {
         Consumer<?, ?> consumer = spec.getConsumerFactoryFn().apply((ImmutableMap.of(
             ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, spec
                 .getProducerConfig().get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
-            ConsumerConfig.GROUP_ID_CONFIG, spec.getSinkGroupId()
+            ConsumerConfig.GROUP_ID_CONFIG, spec.getSinkGroupId(),
+            ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class,
+            ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class
         )));
 
         OffsetAndMetadata committed;
@@ -2172,27 +2182,36 @@ public class KafkaIO {
                          + "stored with Kafka topic '%s' group id '%s'",
                      shard, nextId, writerId, spec.getTopic(), spec.getSinkGroupId());
 
-          writerId = String.format("%s - %X",
+          writerId = String.format("%X - %s",
+                                   new Random().nextInt(Integer.MAX_VALUE),
                                    DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss")
                                        .withZone(DateTimeZone.UTC)
-                                       .print(DateTimeUtils.currentTimeMillis()),
-                                   new Random().nextInt(Integer.MAX_VALUE));
+                                       .print(DateTimeUtils.currentTimeMillis()));
           writerIdState.write(writerId);
-          LOG.info("Assigned writerId {} to shard {}", writerId, shard);
+          LOG.info("Assigned writer id '{}' to shard {}", writerId, shard);
 
         } else {
-          PartitionMetadata metadata = JSON_MAPPER.readValue(committed.metadata(),
-                                                             PartitionMetadata.class);
+          ShardMetadata metadata = JSON_MAPPER.readValue(committed.metadata(),
+                                                         ShardMetadata.class);
 
           checkNotNull(metadata.writerId);
 
           if (writerId == null) {
-            // This might be a restart of the job. This could also be retry of the first bundle
-            // where it was committed to Kafka bug the bundle results were not committed in Beam.
-            LOG.warn("{} : Kafka metadata exists, but there is no stored state."
-                         + "This might be a retry or a job override. Metadata : '{}'",
-                     shard, committed.metadata());
-            writerId = metadata.writerId;
+            // a) This might be a restart of the job from scratch, in which case metatdata
+            // should be ignored and overwritten with new one.
+            // b) This job might be started with an incorrect group id which is an error.
+            // c) There is an extremely small chance that this is a retry of the first bundle
+            // where metatdate was committed to Kafka but the bundle results were not committed
+            // in Beam, in which case it should be treated as correct metadata.
+            // How can we tell these three cases apart? Be safe and throw an exception.
+            //
+            // We could let users explicitly an option to override the existing metadata.
+            //
+            throw new IllegalStateException(String.format(
+              "Kafka metadata exists for shard %d, but there is no stored state for it. "
+              + "This mostly indicates groupId '%s' is already used else where or in earlier runs. "
+              + "Try another group id. Metadata : '%s'.",
+              shard, spec.getSinkGroupId(), committed.metadata()));
           }
 
           checkState(writerId.equals(metadata.writerId),
@@ -2211,13 +2230,12 @@ public class KafkaIO {
                                                           spec, committedSeqId);
 
         synchronized (cache) {
-          if (cache.get(shard) != null) {
-            throw new IllegalStateException("Unexpected concurrent execution of shard " + shard);
-          }
+          checkState(cache.get(shard) == null,
+                     "Unexpected concurrent execution of shard %s", shard);
           cache.put(shard, shardWriter);
         }
 
-        LOG.info("{} : initialized producer {}. Committed sequence id: {}",
+        LOG.info("{} : initialized producer {} with committed sequence id {}",
                  shard, producerName, committedSeqId);
 
         return shardWriter;
@@ -2233,13 +2251,11 @@ public class KafkaIO {
                                                              String producerName) {
 
     Map<String, Object> producerConfig = new HashMap<>(spec.getProducerConfig());
-    producerConfig.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
-                       spec.getKeySerializer());
-    producerConfig.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
-                       spec.getValueSerializer());
-
-    producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-    producerConfig.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, producerName);
+    producerConfig.putAll(ImmutableMap.of(
+        ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, spec.getKeySerializer(),
+        ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, spec.getValueSerializer(),
+        ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true,
+        ProducerConfig.TRANSACTIONAL_ID_CONFIG, producerName));
 
     Producer<K, V> producer = spec.getProducerFactoryFn() != null ?
         spec.getProducerFactoryFn().apply((producerConfig))
