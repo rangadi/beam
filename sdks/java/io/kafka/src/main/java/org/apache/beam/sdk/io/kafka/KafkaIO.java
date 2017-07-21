@@ -31,7 +31,6 @@ import com.google.common.base.MoreObjects;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
@@ -1855,6 +1854,8 @@ public class KafkaIO {
           .apply("Persist ids", GroupByKey.<Integer, KV<Long, KV<K, V>>>create())
           .apply(String.format("Write to Kafka topic '%s'", spec.getTopic()),
                  ParDo.of(new KafkaEOWriter<>(spec)));
+
+      // TODO: add metrics.
     }
   }
 
@@ -1953,14 +1954,11 @@ public class KafkaIO {
       ShardWriter<K, V> writer = getShardWriter(shard, writerIdState, nextId);
       long committedId = writer.committedId;
 
-      LOG.info("XXX Processing {} records", Iterables.size(ctx.element().getValue()));
-
       if (committedId >= nextId) {
         // This is a retry of an already committed batch.
         LOG.info("{}: committed id {} is ahead of expected {}. {} records will be dropped "
                  + "(these are already written).",
                  shard, committedId, nextId - 1, committedId - nextId + 1);
-        // TODO: increment a stat.
         nextId = committedId + 1;
       }
 
@@ -2257,9 +2255,9 @@ public class KafkaIO {
         ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true,
         ProducerConfig.TRANSACTIONAL_ID_CONFIG, producerName));
 
-    Producer<K, V> producer = spec.getProducerFactoryFn() != null ?
-        spec.getProducerFactoryFn().apply((producerConfig))
-        : new KafkaProducer<K, V>(producerConfig);
+    Producer<K, V> producer = spec.getProducerFactoryFn() != null
+      ? spec.getProducerFactoryFn().apply((producerConfig))
+      : new KafkaProducer<K, V>(producerConfig);
 
     producer.initTransactions();
     return producer;

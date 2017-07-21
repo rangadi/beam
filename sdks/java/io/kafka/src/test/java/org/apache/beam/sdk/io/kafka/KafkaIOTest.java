@@ -722,7 +722,7 @@ public class KafkaIOTest {
     // Simply read from kafka source and write to kafka sink. Then verify the records
     // are correctly published to mock kafka producer.
 
-    int numElements = 10; // XXX
+    int numElements = 1000;
 
     synchronized (MOCK_PRODUCER_LOCK) {
 
@@ -740,13 +740,13 @@ public class KafkaIOTest {
             .withTopic(topic)
             .withKeySerializer(IntegerSerializer.class)
             .withValueSerializer(LongSerializer.class)
-            .withEOS()
-            .withSinkGroupId("test")
-            .withNumShards(1) // XXX to get around single Mock Producer.
-            .withKeyCoder(BigEndianIntegerCoder.of())
-            .withValueCoder(BigEndianLongCoder.of())
-            .withConsumerFactoryFn(new ConsumerFactoryFn(
-                Lists.newArrayList(topic), 10, 10, OffsetResetStrategy.EARLIEST))
+            // .withEOS()
+            // .withSinkGroupId("test")
+            // .withNumShards(1)
+            // .withKeyCoder(BigEndianIntegerCoder.of())
+            // .withValueCoder(BigEndianLongCoder.of())
+            // .withConsumerFactoryFn(new ConsumerFactoryFn(
+            //   Lists.newArrayList(topic), 10, 10, OffsetResetStrategy.EARLIEST))
             .withProducerFactoryFn(new ProducerFactoryFn()));
 
       p.run();
