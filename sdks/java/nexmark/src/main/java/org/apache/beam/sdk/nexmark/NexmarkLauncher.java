@@ -25,6 +25,7 @@ import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -103,6 +104,7 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -845,7 +847,20 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     KafkaIO.Read<byte[], byte[]> io = KafkaIO.<byte[], byte[]>read()
         .withKeyDeserializer(ByteArrayDeserializer.class)
         .withValueDeserializer(ByteArrayDeserializer.class)
+        .updateConsumerProperties(
+            // always read from the beginning. The topics are expected to be created for the test.
+            ImmutableMap.of(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"))
         .withBootstrapServers(options.getKafkaBootstrapServers());
+
+    if (options.getNumKafkaTopicPartitions() != null) {
+      // Set explicit partitions. This avoids contacting Kafka cluster from launcher.
+      io = io.withTopicPartitions(IntStream
+                                    .range(0, options.getNumKafkaTopicPartitions())
+                                    .mapToObj(partition -> new TopicPartition(topic, partition))
+                                    .collect(Collectors.toList()));
+    } else {
+      io = io.withTopic(topic);
+    }
 
     if (configuration.usePubsubPublishTime) {
       io = io.withLogAppendTime();
@@ -853,15 +868,6 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
       io = io.withTimestampPolicyFactory((tp, prev) -> new KafkaTimestampPolicy(prev));
     }
 
-    if (options.getNumKafkaTopicPartitions() != null) {
-      // Set explicit partitions. This avoids contacting Kafka cluster from launcher.
-      io = io.withTopicPartitions(IntStream
-              .range(0, options.getNumKafkaTopicPartitions())
-              .mapToObj(partition -> new TopicPartition(topic, partition))
-              .collect(Collectors.toList()));
-    } else {
-      io = io.withTopic(topic);
-    }
 
     return p
         .apply(queryName + ".ReadKafkaEvents", io.withoutMetadata())
