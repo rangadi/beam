@@ -99,7 +99,11 @@ public class NexmarkUtils {
     /**
      * Read from a PubSub topic. It will be fed the same synthetic events by this pipeline.
      */
-    PUBSUB
+    PUBSUB,
+    /**
+     * Read from a Kafka topic. It will be fed the same synthetic events.
+     */
+    KAFKA,
   }
 
   /**
@@ -130,10 +134,14 @@ public class NexmarkUtils {
      * Write raw Events to BigQuery.
      */
     BIGQUERY,
+    /**
+     * Write to a Kafka topic.
+     */
+    KAFKA,
   }
 
   /**
-   * Pub/sub mode to run in.
+   * Pub/sub mode to run in. Pub/sub here is either Google Cloud PubSub or Kafka.
    */
   public enum PubSubMode {
     /**
@@ -147,7 +155,12 @@ public class NexmarkUtils {
     /**
      * Both publish and consume, but as separate jobs.
      */
-    COMBINED
+    COMBINED,
+
+    /**
+     * Both publisher and subscriber in the same pipeline.
+     */
+    SAME_PIPELINE,
   }
 
   /**

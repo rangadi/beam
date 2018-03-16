@@ -92,6 +92,25 @@ public interface NexmarkOptions
 
   void setPubsubSubscription(String pubsubSubscription);
 
+  @Description("Base name of Kafka topic to publish to in streaming mode.")
+  @Nullable
+  String getKafkaTopic();
+
+  void setKafkaTopic(String kafkaTopic);
+
+  @Description("Kafka bootstrap servers. Required with Kafka topics. E.g. 'localhost:9092'.")
+  @Nullable
+  String getKafkaBootstrapServers();
+
+  void setKafkaBootstrapServers(String bootstrapServers);
+
+  @Description("Explicitly provide number of partitions for the Kafka topic. This is useful "
+               + "when the job launcher can not access Kafka cluster due to ACLs.")
+  @Nullable
+  Integer getNumKafkaTopicPartitions();
+
+  void setNumKafkaTopicPartitions(Integer numPartitions);
+
   @Description("Base name of BigQuery table name if using BigQuery output.")
   @Nullable
   @Default.String("nexmark")

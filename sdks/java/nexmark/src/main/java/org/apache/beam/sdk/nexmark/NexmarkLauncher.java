@@ -17,6 +17,7 @@
  */
 package org.apache.beam.sdk.nexmark;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
@@ -33,6 +34,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -42,11 +45,13 @@ import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
+import org.apache.beam.sdk.io.kafka.KafkaIO;
 import org.apache.beam.sdk.metrics.DistributionResult;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
 import org.apache.beam.sdk.metrics.MetricResult;
 import org.apache.beam.sdk.metrics.MetricsFilter;
+import org.apache.beam.sdk.nexmark.NexmarkUtils.SourceType;
 import org.apache.beam.sdk.nexmark.model.Auction;
 import org.apache.beam.sdk.nexmark.model.Bid;
 import org.apache.beam.sdk.nexmark.model.Event;
@@ -87,12 +92,16 @@ import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery7;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.Values;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.joda.time.Duration;
 import org.slf4j.LoggerFactory;
 
@@ -450,7 +459,17 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
    * Invoke the builder with options suitable for running a publish-only child pipeline.
    */
   private void invokeBuilderForPublishOnlyPipeline(PipelineBuilder<NexmarkOptions> builder) {
-    builder.build(options);
+    String jobName = options.getJobName();
+    String appName = options.getAppName();
+    options.setJobName("publisher-" + options.getJobName());
+    options.setAppName("publisher-" + appName);
+    //TODO: Set number of workers based on number of event generators.
+    try {
+      builder.build(options);
+    } finally {
+      options.setJobName(jobName);
+      options.setAppName(appName);
+    }
   }
 
   /**
@@ -734,6 +753,22 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     }
   }
 
+  private static class PubsubMessageToEvent extends DoFn<PubsubMessage, Event> {
+    @ProcessElement
+    public void processElement(ProcessContext c) throws CoderException {
+      Event event = CoderUtils.decodeFromByteArray(Event.CODER, c.element().getPayload());
+      c.output(event);
+    }
+  }
+
+  private static class EventToPubsubMessage extends DoFn<Event, PubsubMessage> {
+    @ProcessElement
+    public void processElement(ProcessContext c) throws CoderException {
+      byte[] payload = CoderUtils.encodeToByteArray(Event.CODER, c.element());
+      c.output(new PubsubMessage(payload, new HashMap<>()));
+    }
+  }
+
   /**
    * Return source of events from Pubsub.
    */
@@ -750,18 +785,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
 
     return p
       .apply(queryName + ".ReadPubsubEvents", io)
-      .apply(queryName + ".PubsubMessageToEvent", ParDo.of(new DoFn<PubsubMessage, Event>() {
-        @ProcessElement
-        public void processElement(ProcessContext c) {
-          byte[] payload = c.element().getPayload();
-          try {
-            Event event = CoderUtils.decodeFromByteArray(Event.CODER, payload);
-            c.output(event);
-          } catch (CoderException e) {
-            LOG.error("Error while decoding Event from pusbSub message: serialization error");
-          }
-        }
-      }));
+      .apply(queryName + ".PubsubMessageToEvent", ParDo.of(new PubsubMessageToEvent()));
   }
 
   /**
@@ -779,6 +803,57 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .apply("OutputWithTimestamp", NexmarkQuery.EVENT_TIMESTAMP_FROM_DATA);
   }
 
+  /** Check if both topic and bootstrap servers are set in options. */
+  private void validateKafkaConfig() {
+    checkArgument(options.getKafkaTopic() != null, "--kafkaTopic is required");
+    checkArgument(options.getKafkaBootstrapServers() != null,
+                  "--KafkaBootstrapServers is required");
+  }
+
+  /**
+   * Return source of events from Pubsub.
+   */
+  private PCollection<Event> sourceEventsFromKafka(Pipeline p) {
+    validateKafkaConfig();
+    String topic = options.getKafkaTopic();
+    NexmarkUtils.console("Reading events from Kafka topic %s", topic);
+
+    KafkaIO.Read<byte[], byte[]> io = KafkaIO.<byte[], byte[]>read()  // XXX readBytes()
+        .withKeyDeserializer(ByteArrayDeserializer.class)
+        .withValueDeserializer(ByteArrayDeserializer.class)
+        .withBootstrapServers(options.getKafkaBootstrapServers());
+    // XXX Need to use logAppendTime(), after syncing beam repo.
+
+    if (options.getNumKafkaTopicPartitions() != null) {
+      // Set explicit partitions. This avoids contacting Kafka cluster from launcher.
+      io = io.withTopicPartitions(IntStream
+              .range(0, options.getNumKafkaTopicPartitions())
+              .mapToObj(partition -> new TopicPartition(topic, partition))
+              .collect(Collectors.toList()));
+    } else {
+      io = io.withTopic(topic);
+    }
+
+    return p
+        .apply(queryName + ".ReadKafkaEvents", io.withoutMetadata())
+        .apply(Values.create())
+        .apply(queryName + ".KafkaMessageToEvent", ParDo.of(new EventDecoderFn()));
+  }
+
+  private static class EventEncoderFn extends DoFn<Event, byte[]> {
+    @ProcessElement
+    public void processElement(ProcessContext c) throws CoderException {
+      c.output(CoderUtils.encodeToByteArray(Event.CODER, c.element()));
+    }
+  }
+
+  private static class EventDecoderFn extends DoFn<byte[], Event> {
+    @ProcessElement
+    public void processElement(ProcessContext c) throws CoderException {
+      c.output(CoderUtils.decodeFromByteArray(Event.CODER, c.element()));
+    }
+  }
+
   /**
    * Send {@code events} to Pubsub.
    */
@@ -794,22 +869,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     }
 
     events
-        .apply(
-            queryName + ".EventToPubsubMessage",
-            ParDo.of(
-                new DoFn<Event, PubsubMessage>() {
-                  @ProcessElement
-                  public void processElement(ProcessContext c) {
-                    try {
-                      byte[] payload = CoderUtils.encodeToByteArray(Event.CODER, c.element());
-                      c.output(new PubsubMessage(payload, new HashMap<>()));
-                    } catch (CoderException e1) {
-                      LOG.error(
-                          "Error while sending Event {} to pusbSub: serialization error",
-                          c.element().toString());
-                    }
-                  }
-                }))
+        .apply(queryName + ".EventToPubsubMessage",  ParDo.of(new EventToPubsubMessage()))
         .apply(queryName + ".WritePubsubEvents", io);
   }
 
@@ -906,6 +966,23 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .apply(queryName + ".WriteBigQueryResults", io);
   }
 
+  /**
+   * Send {@code events} to Pubsub.
+   */
+  private void sinkEventsToKafka(PCollection<Event> events) {
+    validateKafkaConfig();
+    NexmarkUtils.console("Writing events to Kafka topic %s", options.getKafkaTopic());
+
+    events
+        .apply(queryName + ".EventEncoderFn", ParDo.of(new EventEncoderFn()))
+        .apply(queryName + ".WriteKafkaEvents",
+               KafkaIO.<Void, byte[]>write()
+                   .withBootstrapServers(options.getKafkaBootstrapServers())
+                   .withTopic(options.getKafkaTopic())
+                   .withValueSerializer(ByteArraySerializer.class)
+                   .values());
+  }
+
   // ================================================================================
   // Construct overall pipeline
   // ================================================================================
@@ -924,31 +1001,40 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         source = sourceEventsFromAvro(p);
         break;
       case PUBSUB:
+      case KAFKA:
         // Setup the sink for the publisher.
         switch (configuration.pubSubMode) {
           case SUBSCRIBE_ONLY:
             // Nothing to publish.
             break;
-          case PUBLISH_ONLY:
+          case SAME_PIPELINE:
+          case PUBLISH_ONLY: {
             // Send synthesized events to Pubsub in this job.
-            sinkEventsToPubsub(
-                sourceEventsFromSynthetic(p)
-                    .apply(queryName + ".Snoop", NexmarkUtils.snoop(queryName)),
-                now);
-            break;
+            PCollection<Event> events = sourceEventsFromSynthetic(p)
+                .apply(queryName + ".Snoop", NexmarkUtils.snoop(queryName));
+            if (configuration.sourceType == SourceType.KAFKA) {
+              sinkEventsToKafka(events);
+            } else { // pubsub
+              sinkEventsToPubsub(events, now);
+            }
+          }
+          break;
           case COMBINED:
             // Send synthesized events to Pubsub in separate publisher job.
             // We won't start the main pipeline until the publisher has sent the pre-load events.
             // We'll shutdown the publisher job when we notice the main job has finished.
             invokeBuilderForPublishOnlyPipeline(
                 publishOnlyOptions -> {
-                  Pipeline sp = Pipeline.create(options);
+                  Pipeline sp = Pipeline.create(publishOnlyOptions);
                   NexmarkUtils.setupPipeline(configuration.coderStrategy, sp);
                   publisherMonitor = new Monitor<>(queryName, "publisher");
-                  sinkEventsToPubsub(
-                      sourceEventsFromSynthetic(sp)
-                          .apply(queryName + ".Monitor", publisherMonitor.getTransform()),
-                      now);
+                  PCollection<Event> events = sourceEventsFromSynthetic(sp)
+                      .apply(queryName + ".Monitor", publisherMonitor.getTransform());
+                  if (configuration.sourceType == SourceType.KAFKA) {
+                    sinkEventsToKafka(events);
+                  } else { // pubsub
+                    sinkEventsToPubsub(events, now);
+                  }
                   publisherResult = sp.run();
                 });
             break;
@@ -959,10 +1045,15 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
           case PUBLISH_ONLY:
             // Nothing to consume. Leave source null.
             break;
+          case SAME_PIPELINE:
           case SUBSCRIBE_ONLY:
           case COMBINED:
             // Read events from pubsub.
-            source = sourceEventsFromPubsub(p, now);
+            if (configuration.sourceType == SourceType.KAFKA) {
+              source = sourceEventsFromKafka(p);
+            } else {
+              source = sourceEventsFromPubsub(p, now);
+            }
             break;
         }
         break;
