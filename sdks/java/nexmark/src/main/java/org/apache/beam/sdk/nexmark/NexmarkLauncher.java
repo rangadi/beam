@@ -33,6 +33,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -46,6 +47,8 @@ import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.kafka.KafkaIO;
+import org.apache.beam.sdk.io.kafka.KafkaRecord;
+import org.apache.beam.sdk.io.kafka.TimestampPolicy;
 import org.apache.beam.sdk.metrics.DistributionResult;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
@@ -93,6 +96,7 @@ import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Values;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -103,6 +107,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.slf4j.LoggerFactory;
 
 /**
@@ -810,6 +815,25 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
                   "--KafkaBootstrapServers is required");
   }
 
+  private static class KafkaTimestampPolicy extends TimestampPolicy<byte[], byte[]> {
+    private Instant lastTimestamp;
+
+    KafkaTimestampPolicy(Optional<Instant> previousWatermark) {
+      lastTimestamp = previousWatermark.orElse(BoundedWindow.TIMESTAMP_MIN_VALUE);
+    }
+
+    @Override
+    public Instant getTimestampForRecord(PartitionContext ctx, KafkaRecord<byte[], byte[]> record) {
+      lastTimestamp = new Instant(record.getTimestamp());
+      return lastTimestamp;
+    }
+
+    @Override
+    public Instant getWatermark(PartitionContext ctx) {
+      return lastTimestamp; // too simple!
+    }
+  }
+
   /**
    * Return source of events from Pubsub.
    */
@@ -818,11 +842,16 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     String topic = options.getKafkaTopic();
     NexmarkUtils.console("Reading events from Kafka topic %s", topic);
 
-    KafkaIO.Read<byte[], byte[]> io = KafkaIO.<byte[], byte[]>read()  // XXX readBytes()
+    KafkaIO.Read<byte[], byte[]> io = KafkaIO.<byte[], byte[]>read()
         .withKeyDeserializer(ByteArrayDeserializer.class)
         .withValueDeserializer(ByteArrayDeserializer.class)
         .withBootstrapServers(options.getKafkaBootstrapServers());
-    // XXX Need to use logAppendTime(), after syncing beam repo.
+
+    if (configuration.usePubsubPublishTime) {
+      io = io.withLogAppendTime();
+    } else {
+      io = io.withTimestampPolicyFactory((tp, prev) -> new KafkaTimestampPolicy(prev));
+    }
 
     if (options.getNumKafkaTopicPartitions() != null) {
       // Set explicit partitions. This avoids contacting Kafka cluster from launcher.
@@ -973,14 +1002,18 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     validateKafkaConfig();
     NexmarkUtils.console("Writing events to Kafka topic %s", options.getKafkaTopic());
 
+    KafkaIO.Write<Void, byte[]> writer = KafkaIO.<Void, byte[]>write()
+        .withBootstrapServers(options.getKafkaBootstrapServers())
+        .withTopic(options.getKafkaTopic())
+        .withValueSerializer(ByteArraySerializer.class);
+
+    if (!configuration.usePubsubPublishTime) {
+      writer = writer.withInputTimestamp();
+    }
+
     events
         .apply(queryName + ".EventEncoderFn", ParDo.of(new EventEncoderFn()))
-        .apply(queryName + ".WriteKafkaEvents",
-               KafkaIO.<Void, byte[]>write()
-                   .withBootstrapServers(options.getKafkaBootstrapServers())
-                   .withTopic(options.getKafkaTopic())
-                   .withValueSerializer(ByteArraySerializer.class)
-                   .values());
+        .apply(queryName + ".WriteKafkaEvents", writer.values());
   }
 
   // ================================================================================
