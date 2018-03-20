@@ -848,7 +848,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .withKeyDeserializer(ByteArrayDeserializer.class)
         .withValueDeserializer(ByteArrayDeserializer.class)
         .updateConsumerProperties(
-            // always read from the beginning. The topics are expected to be created for the test.
+            // Always read from the beginning. The topics are expected to be created for the test.
             ImmutableMap.of(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"))
         .withBootstrapServers(options.getKafkaBootstrapServers());
 
